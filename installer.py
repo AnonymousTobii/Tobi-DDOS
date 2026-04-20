@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 TOBI v5.0 - Advanced Installation Script
-Multi-platform support with dependency management
-Far superior to MegaMedusa installer
+FIXED for Kali Linux / Debian / Ubuntu
+No permission errors, no Termux commands
 """
 
 import os
@@ -11,9 +11,10 @@ import platform
 import subprocess
 import time
 import json
-from typing import List, Tuple
+import shutil
+from pathlib import Path
 
-# Colors for terminal
+# Colors
 class Colors:
     RED = '\033[91m'
     GREEN = '\033[92m'
@@ -23,11 +24,12 @@ class Colors:
     CYAN = '\033[96m'
     WHITE = '\033[97m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
     RESET = '\033[0m'
     CLEAR = '\033[2J\033[H'
 
 def print_banner():
-    """Display TOBI installation banner"""
+    """Display installation banner"""
     print(Colors.CLEAR)
     print(Colors.MAGENTA + Colors.BOLD + """
 ╔══════════════════════════════════════════════════════════════════════════╗
@@ -40,212 +42,240 @@ def print_banner():
 ║      ╚═╝    ╚═════╝ ╚═════╝ ╚═╝    ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
 ║                                                                          ║
 ║                    🔥 TOBI v5.0 - INSTALLATION SCRIPT 🔥                 ║
-║                      Ultimate Load Testing Framework                      ║
+║              Fixed for Kali Linux | No Permission Errors                 ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """ + Colors.RESET)
-    print(f"\n{Colors.CYAN}📦 Starting TOBI Installation...{Colors.RESET}\n")
-
-def get_system_info():
-    """Detect system information"""
-    system = platform.system()
-    arch = platform.machine()
-    python_version = sys.version.split()[0]
-    node_version = "Not installed"
+    print(f"\n{Colors.CYAN}📊 System Information:{Colors.RESET}")
+    print(f"   OS: {platform.system()} {platform.release()}")
+    print(f"   Python: {sys.version.split()[0]}")
     
+    # Check Node.js
     try:
         result = subprocess.run(['node', '--version'], capture_output=True, text=True)
         if result.returncode == 0:
-            node_version = result.stdout.strip()
+            print(f"   Node.js: {result.stdout.strip()}")
+        else:
+            print(f"   Node.js: {Colors.YELLOW}Not installed{Colors.RESET}")
     except:
-        pass
-    
-    return {
-        'os': system,
-        'arch': arch,
-        'python': python_version,
-        'node': node_version
-    }
+        print(f"   Node.js: {Colors.YELLOW}Not installed{Colors.RESET}")
+    print()
 
-def run_command(cmd: List[str], description: str) -> bool:
+def run_command(cmd, description, use_sudo=False):
     """Run shell command with progress indication"""
     print(f"{Colors.YELLOW}⚙️  {description}...{Colors.RESET}", end=" ", flush=True)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if use_sudo and os.geteuid() != 0:
+            cmd = ['sudo'] + cmd if isinstance(cmd, list) else f"sudo {cmd}"
+        
+        result = subprocess.run(cmd if isinstance(cmd, list) else cmd.split(), 
+                               capture_output=True, text=True, timeout=120)
         if result.returncode == 0:
             print(f"{Colors.GREEN}✓{Colors.RESET}")
             return True
         else:
             print(f"{Colors.RED}✗{Colors.RESET}")
             if result.stderr:
-                print(f"    Error: {result.stderr[:100]}")
+                print(f"    {Colors.DIM}{result.stderr[:100]}{Colors.RESET}")
             return False
     except subprocess.TimeoutExpired:
         print(f"{Colors.RED}✗ (Timeout){Colors.RESET}")
         return False
     except Exception as e:
-        print(f"{Colors.RED}✗ ({str(e)[:50]}){Colors.RESET}")
+        print(f"{Colors.RED}✗ ({str(e)[:30]}){Colors.RESET}")
         return False
 
-def install_node_dependencies():
-    """Install Node.js dependencies with better error handling"""
-    print(f"\n{Colors.CYAN}📦 Installing Node.js Dependencies...{Colors.RESET}")
+def setup_npm_permissions():
+    """Fix npm permissions for current user"""
+    print(f"\n{Colors.CYAN}🔧 Setting up npm permissions...{Colors.RESET}")
     
-    dependencies = [
-        'axios', 'cluster', 'crypto', 'fs', 'http2', 'https', 'net', 'os', 
-        'path', 'tls', 'url', 'events', 'http-proxy-agent', 'https-proxy-agent',
-        'socks-proxy-agent', 'user-agents', 'progress', 'chalk', 'figlet', 
-        'gradient-string', 'blessed', 'blessed-contrib', 'ws', 'express', 
-        'socket.io', 'puppeteer', 'playwright', 'cheerio', 'pino', 'winston'
+    home = str(Path.home())
+    
+    # Create local npm directory
+    npm_global = os.path.join(home, '.npm-global')
+    os.makedirs(npm_global, exist_ok=True)
+    
+    # Update npm config
+    subprocess.run(['npm', 'config', 'set', 'prefix', npm_global], capture_output=True)
+    
+    # Add to PATH in bashrc
+    bashrc = os.path.join(home, '.bashrc')
+    path_line = f'\nexport PATH={npm_global}/bin:$PATH\n'
+    
+    with open(bashrc, 'a') as f:
+        f.write(path_line)
+    
+    # Update current PATH
+    os.environ['PATH'] = f"{npm_global}/bin:{os.environ.get('PATH', '')}"
+    
+    print(f"{Colors.GREEN}✓ npm configured for local user{Colors.RESET}")
+    print(f"{Colors.DIM}   Global packages will go to: {npm_global}{Colors.RESET}")
+
+def install_nodejs_kali():
+    """Install Node.js on Kali Linux"""
+    print(f"\n{Colors.CYAN}📦 Installing Node.js on Kali Linux...{Colors.RESET}")
+    
+    # Check if Node.js is already installed
+    try:
+        result = subprocess.run(['node', '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ Node.js already installed: {result.stdout.strip()}{Colors.RESET}")
+            return True
+    except:
+        pass
+    
+    # Install via curl (NodeSource)
+    commands = [
+        (['curl', '-fsSL', 'https://deb.nodesource.com/setup_20.x', '-o', '/tmp/node_setup.sh'], "Downloading NodeSource setup"),
+        (['bash', '/tmp/node_setup.sh'], "Running NodeSource setup"),
+        (['apt-get', 'update', '-qq'], "Updating package list"),
+        (['apt-get', 'install', '-y', '-qq', 'nodejs'], "Installing Node.js"),
     ]
+    
+    for cmd, desc in commands:
+        if not run_command(cmd, desc, use_sudo=True):
+            print(f"{Colors.RED}Failed to install Node.js{Colors.RESET}")
+            return False
+    
+    # Cleanup
+    os.remove('/tmp/node_setup.sh')
+    
+    # Verify
+    result = subprocess.run(['node', '--version'], capture_output=True, text=True)
+    print(f"{Colors.GREEN}✓ Node.js {result.stdout.strip()} installed{Colors.RESET}")
+    return True
+
+def install_npm_packages():
+    """Install npm packages locally (no sudo)"""
+    print(f"\n{Colors.CYAN}📦 Installing npm packages...{Colors.RESET}")
+    
+    # Create package.json if it doesn't exist
+    if not os.path.exists('package.json'):
+        package_json = {
+            "name": "tobi",
+            "version": "5.0.0",
+            "description": "TOBI - Load Testing Framework",
+            "main": "Tobi.js",
+            "dependencies": {}
+        }
+        with open('package.json', 'w') as f:
+            json.dump(package_json, f, indent=2)
+    
+    # Install packages one by one (avoid permission issues)
+    packages = [
+        'axios', 'chalk', 'figlet', 'gradient-string',
+        'https-proxy-agent', 'socks-proxy-agent', 'user-agents',
+        'progress', 'blessed', 'blessed-contrib', 'ws'
+    ]
+    
+    # Initialize npm if needed
+    if not os.path.exists('node_modules'):
+        run_command(['npm', 'init', '-y'], "Initializing npm")
     
     success_count = 0
-    for dep in dependencies:
-        if run_command(['npm', 'install', dep, '--silent', '--no-progress'], f"Installing {dep}"):
+    for pkg in packages:
+        if run_command(['npm', 'install', pkg, '--save', '--no-audit', '--no-fund'], f"Installing {pkg}"):
             success_count += 1
     
-    print(f"\n{Colors.GREEN}✓ Installed {success_count}/{len(dependencies)} packages{Colors.RESET}")
+    print(f"\n{Colors.GREEN}✓ Installed {success_count}/{len(packages)} packages{Colors.RESET}")
     return success_count
 
-def install_python_dependencies():
-    """Install Python dependencies for proxy scraper"""
-    print(f"\n{Colors.CYAN}🐍 Installing Python Dependencies...{Colors.RESET}")
+def install_python_packages():
+    """Install Python packages"""
+    print(f"\n{Colors.CYAN}🐍 Installing Python packages...{Colors.RESET}")
     
-    python_deps = [
-        'requests', 'beautifulsoup4', 'lxml', 'aiohttp', 'asyncio', 
-        'colorama', 'tqdm', 'fake-useragent', 'selenium', 'scrapy'
-    ]
+    packages = ['requests', 'beautifulsoup4', 'lxml', 'colorama']
     
-    for dep in python_deps:
-        run_command([sys.executable, '-m', 'pip', 'install', dep, '-q'], f"Installing {dep}")
+    for pkg in packages:
+        run_command([sys.executable, '-m', 'pip', 'install', pkg, '-q'], f"Installing {pkg}")
     
-    print(f"{Colors.GREEN}✓ Python dependencies installed{Colors.RESET}")
+    print(f"{Colors.GREEN}✓ Python packages installed{Colors.RESET}")
 
-def create_proxy_scraper():
-    """Create advanced proxy scraper script"""
+def create_scraper_script():
+    """Create simplified proxy scraper (no external deps needed)"""
     scraper_code = '''#!/usr/bin/env python3
-"""
-TOBI Proxy Scraper - Auto-fetch fresh proxies from multiple sources
-"""
+"""TOBI Proxy Scraper - Simplified version"""
 
-import requests
-import json
+import urllib.request
 import re
-import time
-from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
+import sys
 
-PROXY_SOURCES = [
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies.txt",
+SOURCES = [
+    'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all',
+    'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+    'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
 ]
 
-def fetch_proxies():
+def scrape():
     proxies = set()
-    for url in PROXY_SOURCES:
+    for url in SOURCES:
         try:
-            r = requests.get(url, timeout=10)
-            for line in r.text.split('\\n'):
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if re.match(r'^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:\\d+$', line):
-                        proxies.add(line)
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                content = resp.read().decode()
+                matches = re.findall(r'\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:\\d{2,5}\\b', content)
+                for m in matches:
+                    proxies.add(m)
+            print(f"Found {len(matches)} from {url[:50]}")
         except:
-            continue
+            pass
     return list(proxies)
 
-def save_proxies(proxies):
-    with open('proxy.txt', 'w') as f:
-        for proxy in proxies:
-            f.write(f"{proxy}\\n")
-    print(f"Saved {len(proxies)} proxies to proxy.txt")
-
 if __name__ == "__main__":
-    print("Scraping fresh proxies...")
-    proxies = fetch_proxies()
-    save_proxies(proxies)
+    print("Scraping proxies...")
+    proxies = scrape()
+    with open('proxy.txt', 'w') as f:
+        for p in proxies:
+            f.write(f"{p}\\n")
+    print(f"Saved {len(proxies)} proxies to proxy.txt")
 '''
     
     with open('scrape.py', 'w') as f:
         f.write(scraper_code)
-    print(f"{Colors.GREEN}✓ Created advanced proxy scraper{Colors.RESET}")
+    os.chmod('scrape.py', 0o755)
+    print(f"{Colors.GREEN}✓ Created proxy scraper{Colors.RESET}")
 
-def create_optimization_script():
-    """Create system optimization script"""
-    opt_code = '''#!/bin/bash
-# TOBI System Optimizer
-
-echo "🔧 Optimizing system for TOBI..."
-
-# Increase file limits
-ulimit -n 999999
-ulimit -u unlimited
-
-# Network optimizations
-sysctl -w net.core.somaxconn=65535
-sysctl -w net.ipv4.tcp_tw_reuse=1
-sysctl -w net.ipv4.tcp_fin_timeout=30
-sysctl -w net.ipv4.tcp_max_syn_backlog=65535
-sysctl -w net.core.netdev_max_backlog=65535
-
-echo "✓ System optimized"
+def create_tobi_launcher():
+    """Create a launcher script with proper permissions"""
+    launcher = '''#!/bin/bash
+# TOBI Launcher
+cd "$(dirname "$0")"
+export NODE_OPTIONS="--max-old-space-size=4096"
+node Tobi.js "$@"
 '''
-    
-    with open('optimize.sh', 'w') as f:
-        f.write(opt_code)
-    os.chmod('optimize.sh', 0o755)
-    print(f"{Colors.GREEN}✓ Created optimization script{Colors.RESET}")
+    with open('tobi.sh', 'w') as f:
+        f.write(launcher)
+    os.chmod('tobi.sh', 0o755)
+    print(f"{Colors.GREEN}✓ Created launcher script (./tobi.sh){Colors.RESET}")
 
 def main():
     """Main installation routine"""
     print_banner()
     
-    # System info
-    info = get_system_info()
-    print(f"{Colors.BLUE}📊 System Information:{Colors.RESET}")
-    print(f"   OS: {info['os']} ({info['arch']})")
-    print(f"   Python: {info['python']}")
-    print(f"   Node.js: {info['node']}")
-    print()
+    # Check if running as root (not recommended for npm)
+    if os.geteuid() == 0:
+        print(f"{Colors.YELLOW}⚠️  Running as root. npm will use global installation.{Colors.RESET}")
+        print(f"{Colors.YELLOW}   It's better to run without sudo for local packages.{Colors.RESET}\n")
     
-    # Check Node.js
-    if info['node'] == "Not installed":
-        print(f"{Colors.YELLOW}⚠️  Node.js not found! Installing...{Colors.RESET}")
-        if platform.system() == "Android" or "termux" in os.environ.get('PREFIX', ''):
-            run_command(['pkg', 'install', 'nodejs-lts', '-y'], "Installing Node.js")
-        elif platform.system() == "Linux":
-            run_command(['curl', '-fsSL', 'https://deb.nodesource.com/setup_20.x', '|', 'bash'], "Adding NodeSource repo")
-            run_command(['apt-get', 'install', '-y', 'nodejs'], "Installing Node.js")
-        elif platform.system() == "Darwin":
-            run_command(['brew', 'install', 'node@20'], "Installing Node.js")
+    # Step 1: Setup npm permissions
+    if os.geteuid() != 0:
+        setup_npm_permissions()
     
-    # Install dependencies
-    install_node_dependencies()
-    install_python_dependencies()
+    # Step 2: Install Node.js if needed
+    try:
+        subprocess.run(['node', '--version'], capture_output=True, check=True)
+        print(f"\n{Colors.GREEN}✓ Node.js is already installed{Colors.RESET}")
+    except:
+        install_nodejs_kali()
     
-    # Create additional files
-    create_proxy_scraper()
-    create_optimization_script()
+    # Step 3: Install npm packages
+    install_npm_packages()
     
-    # Create package.json if missing
-    if not os.path.exists('package.json'):
-        package_json = {
-            "name": "tobi",
-            "version": "5.0.0",
-            "description": "TOBI - Advanced Load Testing Framework",
-            "main": "Tobi.js",
-            "scripts": {
-                "start": "node Tobi.js",
-                "install": "python3 installer.py",
-                "scrape": "python3 scrape.py",
-                "optimize": "bash optimize.sh"
-            }
-        }
-        with open('package.json', 'w') as f:
-            json.dump(package_json, f, indent=2)
-        print(f"{Colors.GREEN}✓ Created package.json{Colors.RESET}")
+    # Step 4: Install Python packages
+    install_python_packages()
+    
+    # Step 5: Create additional files
+    create_scraper_script()
+    create_tobi_launcher()
     
     # Final success message
     print(f"\n{Colors.GREEN}{Colors.BOLD}")
@@ -256,21 +286,26 @@ def main():
     print("║  🚀 TOBI is ready to launch!                                  ║")
     print("║                                                                ║")
     print("║  Usage:                                                        ║")
-    print("║    node Tobi.js              - Interactive mode               ║")
-    print("║    node Tobi.js <url> <time> <workers> - Direct mode          ║")
-    print("║    python3 scrape.py         - Scrape fresh proxies           ║")
-    print("║    bash optimize.sh          - Optimize system                ║")
+    print("║    ./tobi.sh              - Run with launcher                  ║")
+    print("║    node Tobi.js           - Run directly                       ║")
+    print("║    python3 scrape.py      - Scrape fresh proxies               ║")
+    print("║                                                                ║")
+    print("║  Quick Start:                                                  ║")
+    print("║    ./tobi.sh                                                   ║")
+    print("║    Then enter your target domain when prompted                 ║")
     print("║                                                                ║")
     print("║  ⚠️  AUTHORIZED USE ONLY - Target: 10.0.0.1                   ║")
     print("║                                                                ║")
     print("╚════════════════════════════════════════════════════════════════╝")
     print(Colors.RESET)
     
-    # Auto-start prompt
+    # Ask to run TOBI
     try:
         start = input(f"\n{Colors.CYAN}🚀 Start TOBI now? (y/n): {Colors.RESET}")
         if start.lower() == 'y':
             os.system('node Tobi.js')
+    except KeyboardInterrupt:
+        pass
     except:
         pass
 
@@ -279,5 +314,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}⚠️ Installation cancelled{Colors.RESET}")
+        sys.exit(0)
     except Exception as e:
-        print(f"\n{Colors.RED}❌ Installation error: {e}{Colors.RESET}")
+        print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
+        sys.exit(1)
