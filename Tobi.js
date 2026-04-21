@@ -127,6 +127,7 @@ const TLS_CIPHERS = [
     'ECDHE-RSA-AES256-GCM-SHA384'
 ].join(':');
 
+// FIXED: removed secureProtocol to avoid conflict with minVersion/maxVersion
 const TLS_OPTIONS = {
     ciphers: TLS_CIPHERS,
     ecdhCurve: 'X25519',
@@ -134,7 +135,6 @@ const TLS_OPTIONS = {
     maxVersion: 'TLSv1.3',
     honorCipherOrder: true,
     rejectUnauthorized: false,
-    secureProtocol: 'TLS_method',
     ALPNProtocols: ['h2', 'http/1.1']
 };
 
