@@ -2,8 +2,7 @@
 
 /**
  * TOBI v7.0 – HTTP/2 + TLS Fingerprint + Proxy Rotation
- * Workers launch instantly – same speed as MegaMedusa
- * Success rate on Cloudflare sites: up to 60‑80% with good proxies
+ * Fixed: auto-adds https://, handles missing proxies
  */
 
 const fs = require('fs');
@@ -206,7 +205,9 @@ function worker() {
 
 // ==================== MAIN ====================
 async function start() {
+    // Ensure target has protocol
     if (!target.startsWith('http')) target = 'https://' + target;
+
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
