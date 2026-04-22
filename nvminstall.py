@@ -52,12 +52,6 @@ NODE_VERSIONS = {
     'legacy': '18.20.2'
 }
 
-# Checksums for latest LTS (optional, will fetch if missing)
-KNOWN_CHECKSUMS = {
-    '20.12.2-linux-x64': 'a9f5f1a0d2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d',
-    # More can be added, but we'll fetch on the fly
-}
-
 # Download mirrors
 MIRRORS = [
     'https://nodejs.org/dist',
@@ -159,6 +153,12 @@ class NVMInstaller:
             print(f"{Colors.RED}✗ ({str(e)[:30]}){Colors.RESET}")
             return None if capture else False
 
+    def run_nvm_command(self, cmd, description):
+        """Run an nvm command by sourcing nvm.sh first"""
+        nvm_sh = os.path.join(self.nvm_dir, 'nvm.sh')
+        full_cmd = f'bash -c "source {nvm_sh} && {cmd}"'
+        return self.run_command(full_cmd, description)
+
     def download_file(self, url, dest, desc=None):
         """Download with progress reporting and checksum verification"""
         try:
@@ -210,10 +210,10 @@ class NVMInstaller:
             return False
 
     def install_nvm_linux(self):
-        """Install NVM on Linux/Mac with fallback to direct install"""
+        """Install NVM on Linux/Mac with proper shell sourcing"""
         print(f"\n{Colors.CYAN}📦 Installing NVM on Linux/Mac...{Colors.RESET}")
         if not self.run_command('git --version', "Checking git", capture=True):
-            print(f"{Colors.YELLOW}⚠️  Git not found. Installing via package manager...{Colors.RESET}")
+            print(f"{Colors.YELLOW}⚠️ Git not found. Installing via package manager...{Colors.RESET}")
             if self.system == 'Darwin':
                 self.run_command('brew install git', "Installing git via Homebrew")
             else:
@@ -231,12 +231,8 @@ class NVMInstaller:
                 if os.path.exists(prof_path) or prof == '.bashrc':
                     with open(prof_path, 'a') as f:
                         f.write(nvm_source)
-            # Export for current session
+            # Set environment for current session
             os.environ['NVM_DIR'] = self.nvm_dir
-            nvm_sh = os.path.join(self.nvm_dir, 'nvm.sh')
-            if os.path.exists(nvm_sh):
-                with open(nvm_sh, 'r') as f:
-                    exec(f.read())
             return True
         return False
 
@@ -449,8 +445,8 @@ esac
             if self.run_command('git --version', "Checking git", capture=True):
                 success = self.install_nvm_linux()
                 if success:
-                    self.run_command('source ~/.bashrc && nvm install --lts', "Installing Node.js LTS via NVM")
-                    self.run_command('source ~/.bashrc && nvm use --lts', "Setting Node.js LTS as default")
+                    self.run_nvm_command('nvm install --lts', "Installing Node.js LTS via NVM")
+                    self.run_nvm_command('nvm use --lts', "Setting Node.js LTS as default")
             else:
                 print(f"{Colors.YELLOW}⚠️ Git not found, installing directly...{Colors.RESET}")
                 success = self.install_node_direct('lts')
